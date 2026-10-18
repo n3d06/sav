@@ -23,7 +23,7 @@ public class PullHandler
         if (!_driveService.IsConfigured)
         {
             AnsiConsole.WriteLine("Google Drive is not configured! Please run 'sav config' or 'sav login' first.");
-            return;
+            throw new InvalidOperationException("Google Drive is not configured.");
         }
 
         List<RemoteGameMeta> remoteList = new();
@@ -67,15 +67,23 @@ public class PullHandler
                 return;
             }
 
-            var matched = remoteList.FirstOrDefault(m => m.GameName.Equals(targetInput, StringComparison.OrdinalIgnoreCase) || m.GameId.Equals(targetInput, StringComparison.OrdinalIgnoreCase));
+            var matches = remoteList.Where(m => m.GameName.Contains(targetInput, StringComparison.OrdinalIgnoreCase) || m.GameId.Equals(targetInput, StringComparison.OrdinalIgnoreCase)).ToList();
+            var matched = matches.Count == 1 ? matches[0] : null;
             if (matched != null)
             {
                 await PullSingleAsync(matched);
                 return;
             }
 
-            AnsiConsole.WriteLine($"No save backup matching '{targetInput}' found.");
-            return;
+            if (matches.Count > 1)
+            {
+                AnsiConsole.WriteLine($"More than one backup matches '{targetInput}'. Use a more specific name or choose a number:");
+                foreach (var game in matches)
+                    AnsiConsole.WriteLine($"  {remoteList.IndexOf(game) + 1}. {game.GameName}");
+                throw new InvalidOperationException("Backup name is ambiguous.");
+            }
+            AnsiConsole.WriteLine($"No save backup matching '{targetInput}' found. Try 'sav lsc' to see cloud backups.");
+            throw new InvalidOperationException($"No save backup matching '{targetInput}' found.");
         }
 
         int maxIndexWidth = $"[{remoteList.Count}]".Length;
@@ -126,12 +134,18 @@ public class PullHandler
         else
         {
             AnsiConsole.WriteLine("Invalid selection.");
+            throw new InvalidOperationException("Invalid backup selection.");
         }
     }
 
     private async Task PullSingleAsync(RemoteGameMeta meta)
     {
         AnsiConsole.WriteLine($"Starting download and restore: {meta.GameName}");
+        if (!AnsiConsole.Confirm($"Restore {meta.FileCount} file(s) for '{meta.GameName}'? Existing save files may be overwritten.", defaultVal: false))
+        {
+            AnsiConsole.WriteLine("Restore cancelled; no files were changed.");
+            return;
+        }
 
         bool success = false;
         string? error = null;
@@ -164,12 +178,19 @@ public class PullHandler
         else
         {
             AnsiConsole.WriteLine($"Restore failed: {error ?? "Unknown error"}");
+            throw new InvalidOperationException(error ?? "Restore failed.");
         }
     }
 
     private async Task PullBatchAsync(List<RemoteGameMeta> list)
     {
         AnsiConsole.WriteLine($"Starting pull for {list.Count} game(s) from Google Drive...");
+        var totalFiles = list.Sum(game => game.FileCount);
+        if (!AnsiConsole.Confirm($"Restore {totalFiles} file(s) across {list.Count} game(s)? Existing save files may be overwritten.", defaultVal: false))
+        {
+            AnsiConsole.WriteLine("Restore cancelled; no files were changed.");
+            return;
+        }
 
         int successCount = 0;
         int failCount = 0;
@@ -203,5 +224,9 @@ public class PullHandler
         }
 
         AnsiConsole.WriteLine($"\nCompleted! Succeeded: {successCount}, Failed: {failCount}.");
+        if (failCount > 0)
+        {
+            throw new InvalidOperationException($"{failCount} game(s) failed to restore.");
+        }
     }
 }

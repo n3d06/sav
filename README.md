@@ -27,7 +27,7 @@ sav [command] [arguments]
 | :--- | :--- | :--- |
 | `sav ls` | List detected games on local machine | `sav ls` |
 | `sav lsc` | List game saves available on Google Drive | `sav lsc` |
-| `sav scan` | Rescan local machine for game saves | `sav scan` |
+| `sav scan` | Refresh the Ludusavi manifest and rescan local game saves | `sav scan` |
 | `sav push` | Backup and upload saves to Google Drive | `sav push`<br>`sav push 1`<br>`sav push 1 3 5`<br>`sav push all` |
 | `sav pull` | Download saves from Google Drive and restore to local machine | `sav pull`<br>`sav pull 1`<br>`sav pull 1 3 5`<br>`sav pull all` |
 | `sav status` | Check connection status and Google Drive quota | `sav status` |
@@ -39,6 +39,17 @@ sav [command] [arguments]
 | `sav help` | Display help information | `sav help` |
 
 > Running `sav` without arguments displays the help screen.
+> Unknown commands, failed push/pull operations, and unhandled command errors return a non-zero exit code.
+
+## Quick start
+
+1. Run `sav config` and follow the prompts to configure Google Drive. If the app already includes credentials, you can skip straight to login.
+2. Run `sav login` and approve access in your browser.
+3. Run `sav scan` to refresh the game database and detect local save files.
+4. Run `sav push` and select a game, or use `sav push "Game name"` to find one by name.
+5. On another PC, repeat setup and run `sav pull`. The app asks before restoring because existing save files may be overwritten.
+
+Use `sav push --help`, `sav pull --help`, or `sav <command> --help` for command details. If a game name matches several entries, use a more specific name or select its number from `sav ls` / `sav lsc`.
 
 ---
 
@@ -55,4 +66,3 @@ dotnet build -c Release
 .\sav.bat status
 .\sav.bat push 1 3 5
 ```
- 

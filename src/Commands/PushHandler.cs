@@ -30,7 +30,7 @@ public class PushHandler
         if (!_driveService.IsConfigured)
         {
             AnsiConsole.WriteLine("Google Drive is not configured! Please run 'sav config' or 'sav login' first.");
-            return;
+            throw new InvalidOperationException("Google Drive is not configured.");
         }
 
         List<DetectedGame> games = new();
@@ -80,15 +80,23 @@ public class PushHandler
                 return;
             }
 
-            var matched = games.FirstOrDefault(g => g.Name.Equals(targetInput, StringComparison.OrdinalIgnoreCase) || g.Id.Equals(targetInput, StringComparison.OrdinalIgnoreCase));
+            var matches = games.Where(g => g.Name.Contains(targetInput, StringComparison.OrdinalIgnoreCase) || g.Id.Equals(targetInput, StringComparison.OrdinalIgnoreCase)).ToList();
+            var matched = matches.Count == 1 ? matches[0] : null;
             if (matched != null)
             {
                 await PushSingleAsync(matched);
                 return;
             }
 
-            AnsiConsole.WriteLine($"No game matching '{targetInput}' found.");
-            return;
+            if (matches.Count > 1)
+            {
+                AnsiConsole.WriteLine($"More than one game matches '{targetInput}'. Use a more specific name or choose a number:");
+                foreach (var game in matches)
+                    AnsiConsole.WriteLine($"  {games.IndexOf(game) + 1}. {game.Name}");
+                throw new InvalidOperationException("Game name is ambiguous.");
+            }
+            AnsiConsole.WriteLine($"No game matching '{targetInput}' found. Try 'sav ls' to see detected games.");
+            throw new InvalidOperationException($"No game matching '{targetInput}' found.");
         }
 
         int maxIndexWidth = $"[{games.Count}]".Length;
@@ -140,6 +148,7 @@ public class PushHandler
         else
         {
             AnsiConsole.WriteLine("Invalid selection.");
+            throw new InvalidOperationException("Invalid game selection.");
         }
     }
 
@@ -169,6 +178,7 @@ public class PushHandler
         else
         {
             AnsiConsole.WriteLine($"Upload failed: {msg ?? "Unknown error"}");
+            throw new InvalidOperationException(msg ?? "Upload failed.");
         }
     }
 
@@ -202,11 +212,13 @@ public class PushHandler
             if (failCount > 0)
             {
                 AnsiConsole.WriteLine($"Could not compress {failCount} game(s) due to file errors.");
+                throw new InvalidOperationException($"{failCount} game(s) failed to back up.");
             }
         }
         else
         {
             AnsiConsole.WriteLine($"Upload failed: {message ?? "Unknown error"}");
+            throw new InvalidOperationException(message ?? "Upload failed.");
         }
     }
 }

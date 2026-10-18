@@ -73,6 +73,7 @@ public class RestoreService : IRestoreService
                     catch { }
                 }
 
+                var filesToRestore = new List<(ZipArchiveEntry Entry, string Destination)>();
                 foreach (var entry in zip.Entries)
                 {
                     if (string.IsNullOrEmpty(entry.Name)) continue; // Directory entry
@@ -83,24 +84,54 @@ public class RestoreService : IRestoreService
                     if (parts.Length < 2) continue;
 
                     var driveKey = parts[0];
-                    var relativePath = parts[1].Replace('/', Path.DirectorySeparatorChar);
+                    var archiveRelativePath = parts[1];
+                    if (Path.IsPathRooted(archiveRelativePath) ||
+                        archiveRelativePath.Contains(':') ||
+                        archiveRelativePath.Split('/', '\\').Any(part => part is ".." or "." || part.Length == 0))
+                    {
+                        throw new InvalidDataException($"Unsafe path in backup archive: {entry.FullName}");
+                    }
+                    var relativePath = archiveRelativePath.Replace('/', Path.DirectorySeparatorChar);
 
                     string targetDrive;
                     if (driveMap.TryGetValue(driveKey, out var mappedDrive))
                     {
+                        if (mappedDrive.Length < 2 || mappedDrive.Length > 3 ||
+                            !char.IsAsciiLetter(mappedDrive[0]) || mappedDrive[1] != ':' ||
+                            (mappedDrive.Length == 3 && mappedDrive[2] != '\\'))
+                        {
+                            throw new InvalidDataException($"Unsafe drive mapping for '{driveKey}'.");
+                        }
                         targetDrive = mappedDrive.TrimEnd('\\', '/');
                     }
                     else if (driveKey.StartsWith("drive-", StringComparison.OrdinalIgnoreCase))
                     {
                         var letter = driveKey.Substring("drive-".Length);
+                        if (letter.Length != 1 || !char.IsAsciiLetter(letter[0]))
+                        {
+                            throw new InvalidDataException($"Invalid drive entry in backup archive: {entry.FullName}");
+                        }
                         targetDrive = $"{letter}:";
                     }
                     else
                     {
-                        targetDrive = "C:";
+                        throw new InvalidDataException($"Invalid drive entry in backup archive: {entry.FullName}");
                     }
 
-                    var destPath = Path.Combine(targetDrive + Path.DirectorySeparatorChar, relativePath);
+                    var destinationRoot = Path.GetFullPath(targetDrive + Path.DirectorySeparatorChar);
+                    var destPath = Path.GetFullPath(Path.Combine(destinationRoot, relativePath));
+                    var rootWithSeparator = Path.EndsInDirectorySeparator(destinationRoot)
+                        ? destinationRoot
+                        : destinationRoot + Path.DirectorySeparatorChar;
+                    if (!destPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException($"Unsafe destination path in backup archive: {entry.FullName}");
+                    }
+                    filesToRestore.Add((entry, destPath));
+                }
+
+                foreach (var (entry, destPath) in filesToRestore)
+                {
                     var destDir = Path.GetDirectoryName(destPath);
                     if (!string.IsNullOrEmpty(destDir))
                     {

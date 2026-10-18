@@ -59,6 +59,7 @@ public class BackupService : IBackupService
             return new BackupResult { Success = false, ErrorMessage = "No save files found for this game." };
         }
 
+        string? tempZipToCleanup = null;
         try
         {
             var gameCacheDir = GetGameCacheDir(game.Id);
@@ -74,7 +75,8 @@ public class BackupService : IBackupService
 
             // Temporary file to write zip atomically
             var safeId = SanitizeFolderName(game.Id);
-            var tempZip = Path.Combine(Path.GetTempPath(), $"savesync_{safeId}_{Guid.NewGuid():N}.zip");
+            var tempZip = Path.Combine(gameCacheDir, $".latest-{Guid.NewGuid():N}.tmp");
+            tempZipToCleanup = tempZip;
 
             await Task.Run(() =>
             {
@@ -125,6 +127,11 @@ public class BackupService : IBackupService
                         });
                     }
 
+                    if (fileList.Count == 0)
+                    {
+                        throw new InvalidOperationException("No save files could be read; the existing backup was kept.");
+                    }
+
                     // Embed mapping.yaml in archive for portability and Ludusavi compatibility
                     var serializer = new SerializerBuilder().Build();
                     var mappingObj = new Dictionary<string, object>
@@ -140,9 +147,9 @@ public class BackupService : IBackupService
                     }
                 }
 
-                // Replace latest.zip
-                if (File.Exists(zipPath)) File.Delete(zipPath);
-                File.Move(tempZip, zipPath);
+                // Publish the completed archive in one same-volume replace operation.
+                File.Move(tempZip, zipPath, overwrite: true);
+                tempZipToCleanup = null;
 
                 // Write mapping.yaml to cache directory as well
                 var localSerializer = new SerializerBuilder().Build();
@@ -197,6 +204,13 @@ public class BackupService : IBackupService
                 Success = false,
                 ErrorMessage = ex.Message
             };
+        }
+        finally
+        {
+            if (tempZipToCleanup != null && File.Exists(tempZipToCleanup))
+            {
+                try { File.Delete(tempZipToCleanup); } catch { }
+            }
         }
     }
 
