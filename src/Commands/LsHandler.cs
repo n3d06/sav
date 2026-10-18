@@ -138,7 +138,7 @@ public class LsHandler
             AnsiConsole.MarkupLine("  [dim](use \"sav push <#>\" to upload saves)[/]");
             foreach (var (g, idx) in toPush)
             {
-                AnsiConsole.MarkupLine($"\t[yellow]modified:[/]   [{idx}] {g.Name} [dim]({g.TotalSizeFormatted})[/]");
+                AnsiConsole.MarkupLine($"\t[{idx}] [yellow]modified[/]: {g.Name} [dim]({g.TotalSizeFormatted})[/]");
             }
         }
 
@@ -149,7 +149,7 @@ public class LsHandler
             AnsiConsole.MarkupLine("  [dim](use \"sav push <#>\" to backup for the first time)[/]");
             foreach (var (g, idx) in untracked)
             {
-                AnsiConsole.MarkupLine($"\t[red]untracked:[/]  [{idx}] {g.Name} [dim]({g.TotalSizeFormatted})[/]");
+                AnsiConsole.MarkupLine($"\t[{idx}] [red]untracked[/]: {g.Name} [dim]({g.TotalSizeFormatted})[/]");
             }
         }
 
@@ -160,7 +160,7 @@ public class LsHandler
             AnsiConsole.MarkupLine("  [dim](use \"sav pull <#>\" or \"sav pull all\" to download)[/]");
             foreach (var (g, idx) in toPull)
             {
-                AnsiConsole.MarkupLine($"\t[cyan]newer:[/]      [{idx}] {g.Name} [dim]({g.TotalSizeFormatted})[/]");
+                AnsiConsole.MarkupLine($"\t[{idx}] [cyan]newer[/]: {g.Name} [dim]({g.TotalSizeFormatted})[/]");
             }
             foreach (var r in remoteOnly)
             {

@@ -117,8 +117,8 @@ public class LscHandler
         foreach (var (m, idx, reason) in toRestore)
         {
             var size = string.IsNullOrEmpty(m.FormattedSize) ? "-" : m.FormattedSize;
-            var reasonTag = reason == "newer" ? "[cyan]newer:[/]      " : "[cyan]not on PC:[/]  ";
-            AnsiConsole.MarkupLine($"\t{reasonTag}[{idx}] {m.GameName} [dim]({size})[/]");
+            var reasonTag = reason == "newer" ? "[cyan]newer[/]" : "[cyan]not on PC[/]";
+            AnsiConsole.MarkupLine($"\t[{idx}] {reasonTag}: {m.GameName} [dim]({size})[/]");
         }
 
         if (syncedOrLocalNewer.Count > 0)
