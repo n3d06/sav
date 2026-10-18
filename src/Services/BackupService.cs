@@ -68,6 +68,7 @@ public class BackupService : IBackupService
             // Generate mapping for Ludusavi
             var drives = new Dictionary<string, string>();
             var fileList = new List<object>();
+            var restorePaths = new List<object>();
 
             var zipPath = Path.Combine(gameCacheDir, "latest.zip");
             var metaPath = Path.Combine(gameCacheDir, "meta.json");
@@ -125,6 +126,12 @@ public class BackupService : IBackupService
                             hash = hash,
                             modified = file.LastWriteTime.ToString("o")
                         });
+                        restorePaths.Add(new
+                        {
+                            archivePath = archiveEntryName,
+                            placeholderPath = file.PlaceholderPath,
+                            modifiedUtc = file.LastWriteTime.ToUniversalTime().ToString("o")
+                        });
                     }
 
                     if (fileList.Count == 0)
@@ -144,6 +151,13 @@ public class BackupService : IBackupService
                     using (var writer = new StreamWriter(entryStream, Encoding.UTF8))
                     {
                         writer.Write(yamlContent);
+                    }
+
+                    var restorePathsEntry = archive.CreateEntry("restore-paths.json", CompressionLevel.Optimal);
+                    using (var entryStream = restorePathsEntry.Open())
+                    using (var writer = new StreamWriter(entryStream, Encoding.UTF8))
+                    {
+                        writer.Write(JsonSerializer.Serialize(restorePaths));
                     }
                 }
 

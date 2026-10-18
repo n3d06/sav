@@ -7,11 +7,13 @@ public class RemoveHandler
 {
     private readonly IManifestService _manifestService;
     private readonly ISyncService _syncService;
+    private readonly IGoogleDriveService _driveService;
 
-    public RemoveHandler(IManifestService manifestService, ISyncService syncService)
+    public RemoveHandler(IManifestService manifestService, ISyncService syncService, IGoogleDriveService driveService)
     {
         _manifestService = manifestService;
         _syncService = syncService;
+        _driveService = driveService;
     }
 
     public async Task ExecuteAsync(string? target = null)
@@ -87,19 +89,27 @@ public class RemoveHandler
             return;
         }
 
+        (bool success, string? message)? manifestSync = null;
         await AnsiConsole.Status()
             .Spinner(Spinner.Known.Dots)
-            .StartAsync($"Removing {game.Name} and syncing to Google Drive...", async ctx =>
+            .StartAsync(_driveService.IsConfigured ? $"Removing {game.Name} and syncing to Google Drive..." : $"Removing {game.Name}...", async ctx =>
             {
                 await _manifestService.RemoveCustomGameAsync(game.Id);
-                try
+                if (_driveService.IsConfigured)
                 {
-                    await _syncService.UploadCustomManifestAsync();
+                    try
+                    {
+                        manifestSync = await _syncService.UploadCustomManifestAsync();
+                    }
+                    catch (Exception ex) { manifestSync = (false, ex.Message); }
                 }
-                catch { }
             });
 
         AnsiConsole.WriteLine($"Successfully removed custom game '{game.Name}'.");
+        if (manifestSync is { success: false })
+        {
+            AnsiConsole.MarkupLine($"[yellow]Removal was saved on this PC, but could not be synced to Google Drive: {manifestSync.Value.message}[/]");
+        }
     }
 }
 

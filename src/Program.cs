@@ -66,7 +66,8 @@ public static class Program
             {
                 case "ls":
                     var showAllLs = extraArgs.Any(a => a.Equals("-a", StringComparison.OrdinalIgnoreCase) || a.Equals("--all", StringComparison.OrdinalIgnoreCase));
-                    await sp.GetRequiredService<LsHandler>().ExecuteAsync(showAll: showAllLs);
+                    var forceRescanLs = extraArgs.Any(a => a.Equals("--rescan", StringComparison.OrdinalIgnoreCase));
+                    await sp.GetRequiredService<LsHandler>().ExecuteAsync(forceRescan: forceRescanLs, showAll: showAllLs);
                     break;
 
                 case "lsc":
@@ -164,7 +165,7 @@ public static class Program
         AnsiConsole.WriteLine("These are common sav commands used in various situations:");
         AnsiConsole.WriteLine();
         AnsiConsole.WriteLine("examine games and save files");
-        AnsiConsole.WriteLine("   ls         List game save status (use 'ls -a' for all)");
+        AnsiConsole.WriteLine("   ls         List game save status (use 'ls -a' for all, 'ls --rescan' to find new games)");
         AnsiConsole.WriteLine("   scan       Rescan all save games and manifest database");
         AnsiConsole.WriteLine();
         AnsiConsole.WriteLine("cloud synchronization (Google Drive)");
@@ -189,6 +190,15 @@ public static class Program
     {
         switch (command.ToLowerInvariant())
         {
+            case "ls":
+                AnsiConsole.WriteLine("sav ls [-a | --all] [--rescan]");
+                AnsiConsole.WriteLine("List detected local save games and their Google Drive sync status.");
+                AnsiConsole.WriteLine("Use '--rescan' to search the full game database for newly detected saves.");
+                break;
+            case "lsc":
+                AnsiConsole.WriteLine("sav lsc [-a | --all]");
+                AnsiConsole.WriteLine("List save backups available on Google Drive.");
+                break;
             case "push":
                 AnsiConsole.WriteLine("sav push [game name | number ... | all]");
                 AnsiConsole.WriteLine("Back up detected saves to Google Drive. Run 'sav push' to choose from a list.");
@@ -197,7 +207,7 @@ public static class Program
             case "pull":
                 AnsiConsole.WriteLine("sav pull [game name | number ... | all]");
                 AnsiConsole.WriteLine("Download and restore backups from Google Drive. Existing saves may be overwritten.");
-                AnsiConsole.WriteLine("Examples: sav pull \"Stardew Valley\" | sav pull 1 3 | sav pull all");
+                AnsiConsole.WriteLine("Examples: sav pull \"Stardew Valley\" | sav pull 1 3 | sav pull all (-a, --all)");
                 break;
             case "scan":
             case "sam":

@@ -679,7 +679,11 @@ public class GoogleDriveService : IGoogleDriveService
             progressCallback?.Invoke("Updating catalog index on Google Drive...");
             var catalogJson = JsonSerializer.Serialize(allMetas, new JsonSerializerOptions { WriteIndented = true });
             var catalogBytes = Encoding.UTF8.GetBytes(catalogJson);
-            await UploadOrUpdateFileAsync(rootFolderId, "catalog.json", catalogBytes, "application/json");
+            var catalogUpload = await UploadOrUpdateFileAsync(rootFolderId, "catalog.json", catalogBytes, "application/json");
+            if (!catalogUpload.success)
+            {
+                return (false, catalogUpload.error ?? "Failed to update the Google Drive backup catalog.");
+            }
 
             _cachedRemoteMetas = allMetas;
             return (true, null);

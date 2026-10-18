@@ -9,15 +9,18 @@ public class AddHandler
     private readonly IManifestService _manifestService;
     private readonly IScannerService _scannerService;
     private readonly ISyncService _syncService;
+    private readonly IGoogleDriveService _driveService;
 
     public AddHandler(
         IManifestService manifestService,
         IScannerService scannerService,
-        ISyncService syncService)
+        ISyncService syncService,
+        IGoogleDriveService driveService)
     {
         _manifestService = manifestService;
         _scannerService = scannerService;
         _syncService = syncService;
+        _driveService = driveService;
     }
 
     public async Task ExecuteAsync()
@@ -76,20 +79,28 @@ public class AddHandler
             }
         };
 
+        (bool success, string? message)? manifestSync = null;
         await AnsiConsole.Status()
-            .StartAsync("Saving custom game and syncing to Google Drive...", async ctx =>
+            .StartAsync(_driveService.IsConfigured ? "Saving custom game and syncing to Google Drive..." : "Saving custom game...", async ctx =>
             {
                 await _manifestService.AddCustomGameAsync(newGame);
-                try
+                if (_driveService.IsConfigured)
                 {
-                    await _syncService.UploadCustomManifestAsync();
+                    try
+                    {
+                        manifestSync = await _syncService.UploadCustomManifestAsync();
+                    }
+                    catch (Exception ex) { manifestSync = (false, ex.Message); }
                 }
-                catch { }
             });
 
         AnsiConsole.WriteLine($"\nSuccessfully added custom game: {newGame.Name}");
         AnsiConsole.WriteLine($"ID: {newGame.Id}");
         AnsiConsole.WriteLine($"Portable path: {portablePath}");
+        if (manifestSync is { success: false })
+        {
+            AnsiConsole.MarkupLine($"[yellow]Custom game was saved on this PC, but could not be synced to Google Drive: {manifestSync.Value.message}[/]");
+        }
         AnsiConsole.WriteLine("Run 'sav push' to back up this game save to Google Drive.");
     }
 }

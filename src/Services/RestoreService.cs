@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Compression;
+using System.Text.Json;
 using YamlDotNet.Serialization;
 
 namespace ludusavo.Services;
@@ -50,6 +51,7 @@ public class RestoreService : IRestoreService
 
                 int count = 0;
                 using var zip = ZipFile.OpenRead(zipPath);
+                var portablePaths = ReadPortablePaths(zip);
 
                 // Also check if mapping.yaml is embedded in the zip itself
                 var embeddedMapping = zip.GetEntry("mapping.yaml");
@@ -73,11 +75,22 @@ public class RestoreService : IRestoreService
                     catch { }
                 }
 
-                var filesToRestore = new List<(ZipArchiveEntry Entry, string Destination)>();
+                var filesToRestore = new List<(ZipArchiveEntry Entry, string Destination, DateTime? ModifiedUtc)>();
                 foreach (var entry in zip.Entries)
                 {
                     if (string.IsNullOrEmpty(entry.Name)) continue; // Directory entry
-                    if (entry.FullName.Equals("mapping.yaml", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (entry.FullName.Equals("mapping.yaml", StringComparison.OrdinalIgnoreCase) ||
+                        entry.FullName.Equals("restore-paths.json", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    if (portablePaths.TryGetValue(entry.FullName, out var portable))
+                    {
+                        if (!TryResolvePortablePath(portable.PlaceholderPath, out var portableDestination))
+                        {
+                            throw new InvalidDataException($"Unsafe portable path in backup archive: {entry.FullName}");
+                        }
+                        filesToRestore.Add((entry, portableDestination, portable.ModifiedUtc));
+                        continue;
+                    }
 
                     // Form: drive-C/path/to/file.ext
                     var parts = entry.FullName.Split('/', 2);
@@ -127,10 +140,10 @@ public class RestoreService : IRestoreService
                     {
                         throw new InvalidDataException($"Unsafe destination path in backup archive: {entry.FullName}");
                     }
-                    filesToRestore.Add((entry, destPath));
+                    filesToRestore.Add((entry, destPath, null));
                 }
 
-                foreach (var (entry, destPath) in filesToRestore)
+                foreach (var (entry, destPath, modifiedUtc) in filesToRestore)
                 {
                     var destDir = Path.GetDirectoryName(destPath);
                     if (!string.IsNullOrEmpty(destDir))
@@ -148,6 +161,10 @@ public class RestoreService : IRestoreService
                     }
 
                     entry.ExtractToFile(destPath, overwrite: true);
+                    if (modifiedUtc.HasValue)
+                    {
+                        File.SetLastWriteTimeUtc(destPath, modifiedUtc.Value);
+                    }
                     count++;
                 }
 
@@ -158,5 +175,80 @@ public class RestoreService : IRestoreService
         {
             return new RestoreResult { Success = false, ErrorMessage = ex.Message };
         }
+    }
+
+    private sealed class PortablePathInfo
+    {
+        public string ArchivePath { get; set; } = string.Empty;
+        public string PlaceholderPath { get; set; } = string.Empty;
+        public DateTime? ModifiedUtc { get; set; }
+    }
+
+    private static Dictionary<string, PortablePathInfo> ReadPortablePaths(ZipArchive zip)
+    {
+        var result = new Dictionary<string, PortablePathInfo>(StringComparer.OrdinalIgnoreCase);
+        var entry = zip.GetEntry("restore-paths.json");
+        if (entry == null) return result;
+
+        try
+        {
+            using var reader = new StreamReader(entry.Open());
+            var paths = JsonSerializer.Deserialize<List<PortablePathInfo>>(reader.ReadToEnd(), new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+            foreach (var path in paths ?? Enumerable.Empty<PortablePathInfo>())
+            {
+                if (!string.IsNullOrWhiteSpace(path.ArchivePath) && !string.IsNullOrWhiteSpace(path.PlaceholderPath))
+                {
+                    result[path.ArchivePath] = path;
+                }
+            }
+        }
+        catch { }
+
+        return result;
+    }
+
+    private static bool TryResolvePortablePath(string placeholderPath, out string destination)
+    {
+        destination = string.Empty;
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var roots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["<home>"] = home,
+            ["<documents>"] = Path.Combine(home, "Documents"),
+            ["<winDocuments>"] = Path.Combine(home, "Documents"),
+            ["<savedGames>"] = Path.Combine(home, "Saved Games"),
+            ["<winSavedGames>"] = Path.Combine(home, "Saved Games"),
+            ["<appdata>"] = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            ["<winAppData>"] = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            ["<localappdata>"] = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            ["<winLocalAppData>"] = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            ["<localappdataLow>"] = Path.Combine(home, "AppData", "LocalLow"),
+            ["<winLocalAppDataLow>"] = Path.Combine(home, "AppData", "LocalLow"),
+            ["<winProgramData>"] = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            ["<winDir>"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows)
+        };
+
+        var normalized = placeholderPath.Replace('/', '\\');
+        foreach (var (token, root) in roots)
+        {
+            if (!normalized.Equals(token, StringComparison.OrdinalIgnoreCase) &&
+                !normalized.StartsWith(token + "\\", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var relative = normalized[token.Length..].TrimStart('\\');
+            if (relative.Split('\\').Any(part => part is "" or "." or "..")) return false;
+
+            var rootPath = Path.GetFullPath(root);
+            var resolved = Path.GetFullPath(Path.Combine(rootPath, relative));
+            var rootWithSeparator = Path.EndsInDirectorySeparator(rootPath) ? rootPath : rootPath + Path.DirectorySeparatorChar;
+            if (!resolved.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase)) return false;
+
+            destination = resolved;
+            return true;
+        }
+
+        return false;
     }
 }
