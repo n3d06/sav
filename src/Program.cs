@@ -192,7 +192,7 @@ public static class Program
             case "push":
                 AnsiConsole.WriteLine("sav push [game name | number ... | all]");
                 AnsiConsole.WriteLine("Back up detected saves to Google Drive. Run 'sav push' to choose from a list.");
-                AnsiConsole.WriteLine("Examples: sav push \"Stardew Valley\" | sav push 1 3 | sav push all");
+                AnsiConsole.WriteLine("Examples: sav push \"Stardew Valley\" | sav push 1 3 | sav push all (-a, --all)");
                 break;
             case "pull":
                 AnsiConsole.WriteLine("sav pull [game name | number ... | all]");

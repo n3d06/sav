@@ -71,8 +71,10 @@ public class LscHandler
             int idx = i + 1;
             if (localById.TryGetValue(m.GameId, out var local))
             {
-                var localLatest = local.Files.Count > 0 ? local.Files.Max(f => f.LastWriteTime) : DateTime.MinValue;
-                if (m.Timestamp > localLatest.AddSeconds(5))
+                var localLatestUtc = local.Files.Count > 0
+                    ? local.Files.Max(f => f.LastWriteTime.ToUniversalTime())
+                    : DateTime.MinValue;
+                if (m.Timestamp.ToUniversalTime() > localLatestUtc.AddSeconds(5))
                 {
                     toRestore.Add((m, idx, "newer"));
                 }

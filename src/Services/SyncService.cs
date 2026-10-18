@@ -52,6 +52,7 @@ public class SyncService : ISyncService
         }
 
         game.RemoteModified = remote.Timestamp;
+        var remoteTimestampUtc = remote.Timestamp.ToUniversalTime();
 
         var localZip = Path.Combine(_backupService.GetGameCacheDir(game.Id), "latest.zip");
         if (File.Exists(localZip))
@@ -60,8 +61,10 @@ public class SyncService : ISyncService
             if (!string.IsNullOrEmpty(remote.ArchiveHash) &&
                 string.Equals(localHash, remote.ArchiveHash, StringComparison.OrdinalIgnoreCase))
             {
-                var latestLocalFileTime = game.Files.Count > 0 ? game.Files.Max(f => f.LastWriteTime) : DateTime.MinValue;
-                if (latestLocalFileTime > remote.Timestamp.AddSeconds(5))
+                var latestLocalFileTimeUtc = game.Files.Count > 0
+                    ? game.Files.Max(f => f.LastWriteTime.ToUniversalTime())
+                    : DateTime.MinValue;
+                if (latestLocalFileTimeUtc > remoteTimestampUtc.AddSeconds(5))
                 {
                     game.Status = SyncStatus.LocalNewer;
                 }
@@ -73,17 +76,19 @@ public class SyncService : ISyncService
             }
         }
 
-        var localLatest = game.Files.Count > 0 ? game.Files.Max(f => f.LastWriteTime) : DateTime.MinValue;
+        var localLatestUtc = game.Files.Count > 0
+            ? game.Files.Max(f => f.LastWriteTime.ToUniversalTime())
+            : DateTime.MinValue;
 
-        if (localLatest == DateTime.MinValue && remote.Timestamp > DateTime.MinValue)
+        if (localLatestUtc == DateTime.MinValue && remoteTimestampUtc > DateTime.MinValue)
         {
             game.Status = SyncStatus.RemoteNewer;
         }
-        else if (localLatest > remote.Timestamp.AddSeconds(5))
+        else if (localLatestUtc > remoteTimestampUtc.AddSeconds(5))
         {
             game.Status = SyncStatus.LocalNewer;
         }
-        else if (remote.Timestamp > localLatest.AddSeconds(5))
+        else if (remoteTimestampUtc > localLatestUtc.AddSeconds(5))
         {
             game.Status = SyncStatus.RemoteNewer;
         }

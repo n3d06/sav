@@ -28,7 +28,7 @@ sav [command] [arguments]
 | `sav ls` | List detected games on local machine | `sav ls` |
 | `sav lsc` | List game saves available on Google Drive | `sav lsc` |
 | `sav scan` | Refresh the Ludusavi manifest and rescan local game saves | `sav scan` |
-| `sav push` | Backup and upload saves to Google Drive | `sav push`<br>`sav push 1`<br>`sav push 1 3 5`<br>`sav push all` |
+| `sav push` | Backup and upload saves to Google Drive | `sav push`<br>`sav push 1`<br>`sav push 1 3 5`<br>`sav push all`<br>`sav push -a` |
 | `sav pull` | Download saves from Google Drive and restore to local machine | `sav pull`<br>`sav pull 1`<br>`sav pull 1 3 5`<br>`sav pull all` |
 | `sav status` | Check connection status and Google Drive quota | `sav status` |
 | `sav login` | Log in to Google Drive account via browser | `sav login` |

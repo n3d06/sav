@@ -60,7 +60,10 @@ public class PushHandler
         // If target parameter is provided from CLI: e.g. push 1 3 5 or push all
         if (!string.IsNullOrWhiteSpace(targetInput))
         {
-            if (targetInput.Equals("all", StringComparison.OrdinalIgnoreCase) || targetInput.Equals("a", StringComparison.OrdinalIgnoreCase))
+            if (targetInput.Equals("all", StringComparison.OrdinalIgnoreCase)
+                || targetInput.Equals("a", StringComparison.OrdinalIgnoreCase)
+                || targetInput.Equals("-a", StringComparison.OrdinalIgnoreCase)
+                || targetInput.Equals("--all", StringComparison.OrdinalIgnoreCase))
             {
                 await PushBatchAsync(games);
                 return;
