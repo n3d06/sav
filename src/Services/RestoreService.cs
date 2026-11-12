@@ -82,14 +82,22 @@ public class RestoreService : IRestoreService
                     if (entry.FullName.Equals("mapping.yaml", StringComparison.OrdinalIgnoreCase) ||
                         entry.FullName.Equals("restore-paths.json", StringComparison.OrdinalIgnoreCase)) continue;
 
+                    DateTime? portableModifiedUtc = null;
                     if (portablePaths.TryGetValue(entry.FullName, out var portable))
                     {
-                        if (!TryResolvePortablePath(portable.PlaceholderPath, out var portableDestination))
+                        portableModifiedUtc = portable.ModifiedUtc;
+                        switch (ResolvePortablePath(portable.PlaceholderPath, out var portableDestination))
                         {
-                            throw new InvalidDataException($"Unsafe portable path in backup archive: {entry.FullName}");
+                            case PortablePathResolution.Resolved:
+                                filesToRestore.Add((entry, portableDestination, portable.ModifiedUtc));
+                                continue;
+                            case PortablePathResolution.Unsafe:
+                                throw new InvalidDataException($"Unsafe portable path in backup archive: {entry.FullName}");
+                            case PortablePathResolution.NotPortable:
+                                // Absolute path or unknown placeholder (e.g. Steam userdata, game install dir):
+                                // fall back to the drive-mapped archive path below.
+                                break;
                         }
-                        filesToRestore.Add((entry, portableDestination, portable.ModifiedUtc));
-                        continue;
                     }
 
                     // Form: drive-C/path/to/file.ext
@@ -140,7 +148,7 @@ public class RestoreService : IRestoreService
                     {
                         throw new InvalidDataException($"Unsafe destination path in backup archive: {entry.FullName}");
                     }
-                    filesToRestore.Add((entry, destPath, null));
+                    filesToRestore.Add((entry, destPath, portableModifiedUtc));
                 }
 
                 foreach (var (entry, destPath, modifiedUtc) in filesToRestore)
@@ -210,10 +218,18 @@ public class RestoreService : IRestoreService
         return result;
     }
 
-    private static bool TryResolvePortablePath(string placeholderPath, out string destination)
+    private enum PortablePathResolution
+    {
+        Resolved,
+        NotPortable,
+        Unsafe
+    }
+
+    private static PortablePathResolution ResolvePortablePath(string placeholderPath, out string destination)
     {
         destination = string.Empty;
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var driveRoot = Path.GetPathRoot(home) ?? "C:\\";
         var roots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["<home>"] = home,
@@ -228,7 +244,10 @@ public class RestoreService : IRestoreService
             ["<localappdataLow>"] = Path.Combine(home, "AppData", "LocalLow"),
             ["<winLocalAppDataLow>"] = Path.Combine(home, "AppData", "LocalLow"),
             ["<winProgramData>"] = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            ["<winDir>"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows)
+            ["<winDir>"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            ["<winPublic>"] = Path.Combine(driveRoot, "Users", "Public"),
+            ["<xdgConfig>"] = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            ["<xdgData>"] = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
         };
 
         var normalized = placeholderPath.Replace('/', '\\');
@@ -237,18 +256,22 @@ public class RestoreService : IRestoreService
             if (!normalized.Equals(token, StringComparison.OrdinalIgnoreCase) &&
                 !normalized.StartsWith(token + "\\", StringComparison.OrdinalIgnoreCase)) continue;
 
+            if (string.IsNullOrEmpty(root)) return PortablePathResolution.NotPortable;
+
             var relative = normalized[token.Length..].TrimStart('\\');
-            if (relative.Split('\\').Any(part => part is "" or "." or "..")) return false;
+            if (relative.Split('\\').Any(part => part is "" or "." or "..")) return PortablePathResolution.Unsafe;
 
             var rootPath = Path.GetFullPath(root);
             var resolved = Path.GetFullPath(Path.Combine(rootPath, relative));
             var rootWithSeparator = Path.EndsInDirectorySeparator(rootPath) ? rootPath : rootPath + Path.DirectorySeparatorChar;
-            if (!resolved.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase)) return false;
+            if (!resolved.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase)) return PortablePathResolution.Unsafe;
 
             destination = resolved;
-            return true;
+            return PortablePathResolution.Resolved;
         }
 
-        return false;
+        // Not one of the known profile placeholders (absolute path such as Steam userdata,
+        // or a placeholder we can't map portably): let the caller use the drive-based path.
+        return PortablePathResolution.NotPortable;
     }
 }

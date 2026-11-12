@@ -400,12 +400,17 @@ public class GoogleDriveService : IGoogleDriveService
         return newId;
     }
 
-    private async Task<string?> FindFileIdInFolderAsync(string folderId, string fileName)
+    private async Task<string?> FindFileIdInFolderAsync(string folderId, string fileName, bool throwOnError = false)
     {
         string safeName = EscapeQuery(fileName);
         string q = $"name = '{safeName}' and '{folderId}' in parents and trashed = false";
-        var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id)");
-        if (!res.IsSuccessStatusCode) return null;
+        using var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id)");
+        if (!res.IsSuccessStatusCode)
+        {
+            if (throwOnError)
+                throw new HttpRequestException($"Failed to look up '{fileName}' on Google Drive ({(int)res.StatusCode} {res.StatusCode}).");
+            return null;
+        }
 
         var json = await res.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
@@ -423,7 +428,16 @@ public class GoogleDriveService : IGoogleDriveService
         byte[] content,
         string mimeType = "application/octet-stream")
     {
-        var existingId = await FindFileIdInFolderAsync(folderId, fileName);
+        string? existingId;
+        try
+        {
+            // A failed lookup must not be mistaken for "file missing", or we would create a duplicate.
+            existingId = await FindFileIdInFolderAsync(folderId, fileName, throwOnError: true);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
 
         if (!string.IsNullOrEmpty(existingId))
         {
@@ -479,14 +493,21 @@ public class GoogleDriveService : IGoogleDriveService
         }
     }
 
-    public async Task<List<string>> ListRemoteGameIdsAsync()
+    public Task<List<string>> ListRemoteGameIdsAsync() => ListRemoteGameIdsCoreAsync(throwOnError: false);
+
+    private async Task<List<string>> ListRemoteGameIdsCoreAsync(bool throwOnError)
     {
         await EnsureAuthenticatedAsync();
         var rootId = await GetOrCreateRootFolderIdAsync();
 
         string q = $"'{rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false";
-        var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id,name)&pageSize=1000");
-        if (!res.IsSuccessStatusCode) return new List<string>();
+        using var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id,name)&pageSize=1000");
+        if (!res.IsSuccessStatusCode)
+        {
+            if (throwOnError)
+                throw new HttpRequestException($"Failed to list game folders on Google Drive ({(int)res.StatusCode} {res.StatusCode}).");
+            return new List<string>();
+        }
 
         var json = await res.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
@@ -509,15 +530,22 @@ public class GoogleDriveService : IGoogleDriveService
         return list;
     }
 
-    public async Task<RemoteGameMeta?> GetRemoteMetaAsync(string gameId)
+    public Task<RemoteGameMeta?> GetRemoteMetaAsync(string gameId) => GetRemoteMetaCoreAsync(gameId, throwOnError: false);
+
+    private async Task<RemoteGameMeta?> GetRemoteMetaCoreAsync(string gameId, bool throwOnError)
     {
         await EnsureAuthenticatedAsync();
         var gameFolderId = await GetOrCreateGameFolderIdAsync(gameId);
-        var metaFileId = await FindFileIdInFolderAsync(gameFolderId, "meta.json");
+        var metaFileId = await FindFileIdInFolderAsync(gameFolderId, "meta.json", throwOnError);
         if (string.IsNullOrEmpty(metaFileId)) return null;
 
-        var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{metaFileId}?alt=media");
-        if (!res.IsSuccessStatusCode) return null;
+        using var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{metaFileId}?alt=media");
+        if (!res.IsSuccessStatusCode)
+        {
+            if (throwOnError)
+                throw new HttpRequestException($"Failed to download meta.json for '{gameId}' ({(int)res.StatusCode} {res.StatusCode}).");
+            return null;
+        }
 
         var json = await res.Content.ReadAsStringAsync();
         var meta = JsonSerializer.Deserialize<RemoteGameMeta>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -533,57 +561,65 @@ public class GoogleDriveService : IGoogleDriveService
         if (_cachedRemoteMetas != null && !forceRefresh)
             return _cachedRemoteMetas;
 
-        var result = new Dictionary<string, RemoteGameMeta>(StringComparer.OrdinalIgnoreCase);
-        if (!IsConfigured) return result;
+        if (!IsConfigured) return new Dictionary<string, RemoteGameMeta>(StringComparer.OrdinalIgnoreCase);
 
         var ok = await EnsureAuthenticatedAsync();
-        if (!ok) return result;
+        if (!ok) return new Dictionary<string, RemoteGameMeta>(StringComparer.OrdinalIgnoreCase);
 
         try
         {
-            var rootId = await GetOrCreateRootFolderIdAsync();
-            var catalogId = await FindFileIdInFolderAsync(rootId, "catalog.json");
+            return await LoadRemoteMetasStrictAsync(forceRefresh: true);
+        }
+        catch
+        {
+            // Read-only callers (ls, lsc, pull) can live with an empty list on network errors.
+            // The failed result is deliberately NOT cached so writers never reuse it.
+            return new Dictionary<string, RemoteGameMeta>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
 
-            if (!string.IsNullOrEmpty(catalogId))
-            {
-                var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{catalogId}?alt=media");
-                if (res.IsSuccessStatusCode)
-                {
-                    var json = await res.Content.ReadAsStringAsync();
-                    var catalog = JsonSerializer.Deserialize<Dictionary<string, RemoteGameMeta>>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    if (catalog != null)
-                    {
-                        foreach (var kvp in catalog)
-                        {
-                            kvp.Value.GameId = kvp.Key;
-                            result[kvp.Key] = kvp.Value;
-                        }
-                        _cachedRemoteMetas = result;
-                        return result;
-                    }
-                }
-            }
+    /// <summary>
+    /// Loads the full remote catalog and throws if any part of it could not be read.
+    /// Must be used before rewriting catalog.json, otherwise a transient error would
+    /// produce a partial catalog that drops every game not in the current batch.
+    /// </summary>
+    private async Task<Dictionary<string, RemoteGameMeta>> LoadRemoteMetasStrictAsync(bool forceRefresh = false)
+    {
+        if (_cachedRemoteMetas != null && !forceRefresh)
+            return _cachedRemoteMetas;
 
-            // Fallback if catalog.json does not exist: Scan each game folder
-            var gameIds = await ListRemoteGameIdsAsync();
-            if (gameIds.Count > 0)
+        var result = new Dictionary<string, RemoteGameMeta>(StringComparer.OrdinalIgnoreCase);
+        var jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+        var rootId = await GetOrCreateRootFolderIdAsync();
+        var catalogId = await FindFileIdInFolderAsync(rootId, "catalog.json", throwOnError: true);
+
+        if (!string.IsNullOrEmpty(catalogId))
+        {
+            using var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{catalogId}?alt=media");
+            if (!res.IsSuccessStatusCode)
+                throw new HttpRequestException($"Failed to download catalog.json from Google Drive ({(int)res.StatusCode} {res.StatusCode}).");
+
+            var json = await res.Content.ReadAsStringAsync();
+            var catalog = JsonSerializer.Deserialize<Dictionary<string, RemoteGameMeta>>(json, jsonOptions)
+                ?? throw new InvalidDataException("catalog.json on Google Drive is empty or invalid.");
+
+            foreach (var kvp in catalog)
             {
-                var tasks = gameIds.Select(async id =>
-                {
-                    var meta = await GetRemoteMetaAsync(id);
-                    return (id, meta);
-                });
-                var metas = await Task.WhenAll(tasks);
-                foreach (var m in metas)
-                {
-                    if (m.meta != null)
-                    {
-                        result[m.id] = m.meta;
-                    }
-                }
+                kvp.Value.GameId = kvp.Key;
+                result[kvp.Key] = kvp.Value;
             }
         }
-        catch { }
+        else
+        {
+            // Fallback if catalog.json does not exist: scan each game folder
+            var gameIds = await ListRemoteGameIdsCoreAsync(throwOnError: true);
+            var metas = await Task.WhenAll(gameIds.Select(async id => (id, meta: await GetRemoteMetaCoreAsync(id, throwOnError: true))));
+            foreach (var (id, meta) in metas)
+            {
+                if (meta != null) result[id] = meta;
+            }
+        }
 
         _cachedRemoteMetas = result;
         return result;
@@ -624,7 +660,8 @@ public class GoogleDriveService : IGoogleDriveService
         {
             progressCallback?.Invoke("Preparing storage folder on Google Drive...");
             var rootFolderId = await GetOrCreateRootFolderIdAsync();
-            var allMetas = await GetAllRemoteMetasAsync();
+            // Strict load: abort the push rather than rewrite catalog.json from a partial view.
+            var allMetas = new Dictionary<string, RemoteGameMeta>(await LoadRemoteMetasStrictAsync(), StringComparer.OrdinalIgnoreCase);
 
             var uploadItems = new List<(string folderId, string fileName, byte[] content, string mime)>();
 
@@ -789,11 +826,14 @@ public class GoogleDriveService : IGoogleDriveService
                 }
             }
 
-            var allMetas = await GetAllRemoteMetasAsync();
+            var allMetas = new Dictionary<string, RemoteGameMeta>(await LoadRemoteMetasStrictAsync(forceRefresh: true), StringComparer.OrdinalIgnoreCase);
             if (allMetas.Remove(gameId))
             {
                 var catalogJson = JsonSerializer.Serialize(allMetas, new JsonSerializerOptions { WriteIndented = true });
-                await UploadOrUpdateFileAsync(rootId, "catalog.json", Encoding.UTF8.GetBytes(catalogJson), "application/json");
+                var catalogUpload = await UploadOrUpdateFileAsync(rootId, "catalog.json", Encoding.UTF8.GetBytes(catalogJson), "application/json");
+                if (!catalogUpload.success)
+                    return (false, catalogUpload.error ?? "Failed to update the Google Drive backup catalog.");
+                _cachedRemoteMetas = allMetas;
             }
 
             return (true, null);

@@ -98,6 +98,58 @@ public class RestoreServiceTests
         }
     }
 
+    [Fact]
+    public async Task Restore_falls_back_to_drive_path_when_placeholder_is_absolute()
+    {
+        // e.g. Steam userdata or game install dir: ScannerService stores an absolute path, not a <token>.
+        var testId = $"sav-test-{Guid.NewGuid():N}";
+        var cacheDir = Path.Combine(Path.GetTempPath(), testId);
+        var targetDir = Path.Combine(Path.GetTempPath(), testId + "-target");
+        var targetFile = Path.GetFullPath(Path.Combine(targetDir, "save.dat"));
+        var root = Path.GetPathRoot(targetFile)!;
+        var letter = root.TrimEnd(':', '\\', '/').ToUpperInvariant();
+        var archivePath = $"drive-{letter}/{targetFile[root.Length..].Replace('\\', '/')}";
+        var zipPath = Path.Combine(cacheDir, "backup.zip");
+        var expectedTime = DateTime.UtcNow.AddDays(-2);
+        Directory.CreateDirectory(cacheDir);
+
+        try
+        {
+            using (var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+            {
+                var file = zip.CreateEntry(archivePath);
+                await using (var writer = new StreamWriter(file.Open()))
+                {
+                    await writer.WriteAsync("steam-save");
+                }
+
+                var map = zip.CreateEntry("restore-paths.json");
+                await using var mapWriter = new StreamWriter(map.Open());
+                await mapWriter.WriteAsync(JsonSerializer.Serialize(new[]
+                {
+                    new
+                    {
+                        archivePath,
+                        placeholderPath = targetFile.Replace('\\', '/'),
+                        modifiedUtc = expectedTime.ToString("O")
+                    }
+                }));
+            }
+
+            var service = new RestoreService(new TestConfigService(cacheDir));
+            var result = await service.RestoreGameAsync("test", zipPath);
+
+            Assert.True(result.Success, result.ErrorMessage);
+            Assert.Equal("steam-save", await File.ReadAllTextAsync(targetFile));
+            Assert.Equal(expectedTime.Ticks, File.GetLastWriteTimeUtc(targetFile).Ticks);
+        }
+        finally
+        {
+            if (Directory.Exists(targetDir)) Directory.Delete(targetDir, recursive: true);
+            if (Directory.Exists(cacheDir)) Directory.Delete(cacheDir, recursive: true);
+        }
+    }
+
     private sealed class TestConfigService(string cacheDir) : IConfigService
     {
         public AppSettings Settings { get; } = new();

@@ -75,7 +75,6 @@ public class BackupService : IBackupService
             var mappingPath = Path.Combine(gameCacheDir, "mapping.yaml");
 
             // Temporary file to write zip atomically
-            var safeId = SanitizeFolderName(game.Id);
             var tempZip = Path.Combine(gameCacheDir, $".latest-{Guid.NewGuid():N}.tmp");
             tempZipToCleanup = tempZip;
 
