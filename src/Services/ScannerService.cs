@@ -182,14 +182,22 @@ public class ScannerService : IScannerService
         try
         {
             var normalized = Path.GetFullPath(trimmed);
-            // Replace longest matching placeholder first
-            foreach (var kvp in _placeholders.OrderByDescending(p => p.Value.Length))
+            // Replace longest matching placeholder first. Only real folder paths qualify (skips
+            // <osUserName> and folders Windows couldn't resolve, which come back as "").
+            foreach (var kvp in _placeholders
+                         .Where(p => !string.IsNullOrEmpty(p.Value) && Path.IsPathFullyQualified(p.Value))
+                         .OrderByDescending(p => p.Value.Length))
             {
-                if (normalized.StartsWith(kvp.Value, StringComparison.OrdinalIgnoreCase))
-                {
-                    var rel = normalized.Substring(kvp.Value.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                    return $"{kvp.Key}/{rel.Replace('\\', '/')}";
-                }
+                var root = kvp.Value.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (!normalized.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
+
+                // Must end on a folder boundary: C:\Users\me2 is not inside C:\Users\me.
+                if (normalized.Length > root.Length &&
+                    normalized[root.Length] != Path.DirectorySeparatorChar &&
+                    normalized[root.Length] != Path.AltDirectorySeparatorChar) continue;
+
+                var rel = normalized.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                return rel.Length == 0 ? kvp.Key : $"{kvp.Key}/{rel.Replace('\\', '/')}";
             }
             return normalized.Replace('\\', '/');
         }

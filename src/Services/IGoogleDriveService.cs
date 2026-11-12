@@ -53,7 +53,6 @@ public interface IGoogleDriveService
     Task<(bool success, string? error)> DownloadGameSaveAsync(string gameId, string targetDir);
     Task<(bool success, string? error)> UploadCustomManifestAsync(string localPath);
     Task<(bool success, string? error)> DownloadCustomManifestAsync(string localPath);
-    Task<(bool success, string? error)> DeleteGameSaveAsync(string gameId);
     Task<(long usedBytes, long totalBytes, string? userEmail)> GetStorageQuotaAsync();
 }
 

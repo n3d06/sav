@@ -72,7 +72,7 @@ public class GoogleDriveService : IGoogleDriveService
                 Content = new FormUrlEncodedContent(formParams)
             };
 
-            var response = await _httpClient.SendAsync(request);
+            using var response = await _httpClient.SendAsync(request);
             if (!response.IsSuccessStatusCode)
                 return false;
 
@@ -115,19 +115,40 @@ public class GoogleDriveService : IGoogleDriveService
             .Replace('+', '-')
             .Replace('/', '_');
 
-        // Find an available local port
-        var tcp = new TcpListener(IPAddress.Loopback, 0);
-        tcp.Start();
-        int port = ((IPEndPoint)tcp.LocalEndpoint).Port;
-        tcp.Stop();
+        // Open the local callback listener. The free port found via TcpListener can be taken by
+        // another process before HttpListener binds it, so retry with a fresh port a few times.
+        HttpListener? openedListener = null;
+        string redirectUri = string.Empty;
+        for (int attempt = 0; attempt < 5 && openedListener == null; attempt++)
+        {
+            var tcp = new TcpListener(IPAddress.Loopback, 0);
+            tcp.Start();
+            int port = ((IPEndPoint)tcp.LocalEndpoint).Port;
+            tcp.Stop();
 
-        string redirectUri = $"http://127.0.0.1:{port}/";
+            var candidateUri = $"http://127.0.0.1:{port}/";
+            var candidate = new HttpListener();
+            candidate.Prefixes.Add(candidateUri);
+            try
+            {
+                candidate.Start();
+                openedListener = candidate;
+                redirectUri = candidateUri;
+            }
+            catch (HttpListenerException)
+            {
+                candidate.Close();
+            }
+        }
+
+        if (openedListener == null)
+        {
+            return (false, "Could not open a local port for the Google login callback. Please try again.");
+        }
+        using var listener = openedListener;
+
         string scope = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email";
         string authUrl = $"https://accounts.google.com/o/oauth2/v2/auth?client_id={Uri.EscapeDataString(settings.EffectiveClientId)}&redirect_uri={Uri.EscapeDataString(redirectUri)}&response_type=code&scope={Uri.EscapeDataString(scope)}&access_type=offline&prompt=consent&code_challenge={Uri.EscapeDataString(codeChallenge)}&code_challenge_method=S256";
-
-        using var listener = new HttpListener();
-        listener.Prefixes.Add(redirectUri);
-        listener.Start();
 
         statusCallback?.Invoke("Opening browser for Google login...");
 
@@ -203,7 +224,7 @@ public class GoogleDriveService : IGoogleDriveService
             Content = new FormUrlEncodedContent(tokenParams)
         };
 
-        var tokenRes = await _httpClient.SendAsync(tokenReq);
+        using var tokenRes = await _httpClient.SendAsync(tokenReq);
         if (!tokenRes.IsSuccessStatusCode)
         {
             var errBody = await tokenRes.Content.ReadAsStringAsync();
@@ -227,7 +248,7 @@ public class GoogleDriveService : IGoogleDriveService
         // Retrieve user email
         try
         {
-            var userRes = await _httpClient.GetAsync("https://www.googleapis.com/oauth2/v2/userinfo");
+            using var userRes = await _httpClient.GetAsync("https://www.googleapis.com/oauth2/v2/userinfo");
             if (userRes.IsSuccessStatusCode)
             {
                 var userJson = await userRes.Content.ReadAsStringAsync();
@@ -274,8 +295,8 @@ public class GoogleDriveService : IGoogleDriveService
 
     public async Task<(long usedBytes, long totalBytes, string? userEmail)> GetStorageQuotaAsync()
     {
-        await EnsureAuthenticatedAsync();
-        var res = await _httpClient.GetAsync("https://www.googleapis.com/drive/v3/about?fields=user(emailAddress),storageQuota(limit,usage)");
+        if (!await EnsureAuthenticatedAsync()) return (0, 0, null);
+        using var res = await _httpClient.GetAsync("https://www.googleapis.com/drive/v3/about?fields=user(emailAddress),storageQuota(limit,usage)");
         if (!res.IsSuccessStatusCode) return (0, 0, null);
 
         var json = await res.Content.ReadAsStringAsync();
@@ -308,7 +329,7 @@ public class GoogleDriveService : IGoogleDriveService
         if (!string.IsNullOrEmpty(settings.GoogleRootFolderId))
         {
             // Check if folder still exists
-            var checkRes = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{settings.GoogleRootFolderId}?fields=id,trashed");
+            using var checkRes = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{settings.GoogleRootFolderId}?fields=id,trashed");
             if (checkRes.IsSuccessStatusCode)
             {
                 var checkJson = await checkRes.Content.ReadAsStringAsync();
@@ -322,7 +343,7 @@ public class GoogleDriveService : IGoogleDriveService
 
         // Find 'sav' folder in root
         string q = "name = 'sav' and 'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false";
-        var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id)");
+        using var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id)");
         if (res.IsSuccessStatusCode)
         {
             var json = await res.Content.ReadAsStringAsync();
@@ -346,7 +367,7 @@ public class GoogleDriveService : IGoogleDriveService
         };
         var createJson = JsonSerializer.Serialize(createPayload);
         using var createContent = new StringContent(createJson, Encoding.UTF8, "application/json");
-        var createRes = await _httpClient.PostAsync("https://www.googleapis.com/drive/v3/files?fields=id", createContent);
+        using var createRes = await _httpClient.PostAsync("https://www.googleapis.com/drive/v3/files?fields=id", createContent);
         createRes.EnsureSuccessStatusCode();
 
         var resJson = await createRes.Content.ReadAsStringAsync();
@@ -367,7 +388,7 @@ public class GoogleDriveService : IGoogleDriveService
         string safeName = EscapeQuery(gameId);
         string q = $"name = '{safeName}' and '{rootFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false";
 
-        var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id)");
+        using var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id)");
         if (res.IsSuccessStatusCode)
         {
             var json = await res.Content.ReadAsStringAsync();
@@ -389,7 +410,7 @@ public class GoogleDriveService : IGoogleDriveService
         };
         var createJson = JsonSerializer.Serialize(createPayload);
         using var createContent = new StringContent(createJson, Encoding.UTF8, "application/json");
-        var createRes = await _httpClient.PostAsync("https://www.googleapis.com/drive/v3/files?fields=id", createContent);
+        using var createRes = await _httpClient.PostAsync("https://www.googleapis.com/drive/v3/files?fields=id", createContent);
         createRes.EnsureSuccessStatusCode();
 
         var resJson = await createRes.Content.ReadAsStringAsync();
@@ -448,7 +469,7 @@ public class GoogleDriveService : IGoogleDriveService
             };
             request.Content.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
 
-            var res = await _httpClient.SendAsync(request);
+            using var res = await _httpClient.SendAsync(request);
             if (!res.IsSuccessStatusCode)
             {
                 var err = await res.Content.ReadAsStringAsync();
@@ -479,7 +500,7 @@ public class GoogleDriveService : IGoogleDriveService
                 Content = multipart
             };
 
-            var res = await _httpClient.SendAsync(request);
+            using var res = await _httpClient.SendAsync(request);
             if (!res.IsSuccessStatusCode)
             {
                 var err = await res.Content.ReadAsStringAsync();
@@ -497,28 +518,37 @@ public class GoogleDriveService : IGoogleDriveService
 
     private async Task<List<string>> ListRemoteGameIdsCoreAsync(bool throwOnError)
     {
-        await EnsureAuthenticatedAsync();
+        if (!await EnsureAuthenticatedAsync())
+        {
+            if (throwOnError) throw new InvalidOperationException("Google Drive authentication error. Please run 'sav login'.");
+            return new List<string>();
+        }
         var rootId = await GetOrCreateRootFolderIdAsync();
 
         string q = $"'{rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false";
-        using var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id,name)&pageSize=1000");
-        if (!res.IsSuccessStatusCode)
-        {
-            if (throwOnError)
-                throw new HttpRequestException($"Failed to list game folders on Google Drive ({(int)res.StatusCode} {res.StatusCode}).");
-            return new List<string>();
-        }
-
-        var json = await res.Content.ReadAsStringAsync();
-        using var doc = JsonDocument.Parse(json);
-        var files = doc.RootElement.GetProperty("files");
         var list = new List<string>();
+        string? pageToken = null;
 
-        foreach (var f in files.EnumerateArray())
+        // Drive returns at most 1000 items per page; follow nextPageToken so large libraries aren't cut off.
+        do
         {
-            var name = f.GetProperty("name").GetString();
-            if (!string.IsNullOrEmpty(name))
+            var url = $"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=nextPageToken,files(id,name)&pageSize=1000";
+            if (pageToken != null) url += $"&pageToken={Uri.EscapeDataString(pageToken)}";
+
+            using var res = await _httpClient.GetAsync(url);
+            if (!res.IsSuccessStatusCode)
             {
+                if (throwOnError)
+                    throw new HttpRequestException($"Failed to list game folders on Google Drive ({(int)res.StatusCode} {res.StatusCode}).");
+                return list;
+            }
+
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+            foreach (var f in doc.RootElement.GetProperty("files").EnumerateArray())
+            {
+                var name = f.GetProperty("name").GetString();
+                if (string.IsNullOrEmpty(name)) continue;
+
                 list.Add(name);
                 var id = f.GetProperty("id").GetString();
                 if (!string.IsNullOrEmpty(id))
@@ -526,7 +556,10 @@ public class GoogleDriveService : IGoogleDriveService
                     _folderCache[name] = id;
                 }
             }
-        }
+
+            pageToken = doc.RootElement.TryGetProperty("nextPageToken", out var tokenProp) ? tokenProp.GetString() : null;
+        } while (!string.IsNullOrEmpty(pageToken));
+
         return list;
     }
 
@@ -534,7 +567,11 @@ public class GoogleDriveService : IGoogleDriveService
 
     private async Task<RemoteGameMeta?> GetRemoteMetaCoreAsync(string gameId, bool throwOnError)
     {
-        await EnsureAuthenticatedAsync();
+        if (!await EnsureAuthenticatedAsync())
+        {
+            if (throwOnError) throw new InvalidOperationException("Google Drive authentication error. Please run 'sav login'.");
+            return null;
+        }
         var gameFolderId = await GetOrCreateGameFolderIdAsync(gameId);
         var metaFileId = await FindFileIdInFolderAsync(gameFolderId, "meta.json", throwOnError);
         if (string.IsNullOrEmpty(metaFileId)) return null;
@@ -977,7 +1014,7 @@ public class GoogleDriveService : IGoogleDriveService
         var fileId = await FindFileIdInFolderAsync(rootId, "custom-games.yaml");
         if (string.IsNullOrEmpty(fileId)) return (false, "File custom-games.yaml not found on Google Drive");
 
-        var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{fileId}?alt=media");
+        using var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{fileId}?alt=media");
         if (!res.IsSuccessStatusCode) return (false, "Failed to download file");
 
         var dir = Path.GetDirectoryName(localPath);
@@ -985,47 +1022,5 @@ public class GoogleDriveService : IGoogleDriveService
         var bytes = await res.Content.ReadAsByteArrayAsync();
         await File.WriteAllBytesAsync(localPath, bytes);
         return (true, null);
-    }
-
-    public async Task<(bool success, string? error)> DeleteGameSaveAsync(string gameId)
-    {
-        if (!IsConfigured) return (false, "Google Drive not configured");
-        var ok = await EnsureAuthenticatedAsync();
-        if (!ok) return (false, "Google Drive authentication error");
-
-        try
-        {
-            var rootId = await GetOrCreateRootFolderIdAsync();
-            string safeName = EscapeQuery(gameId);
-            string q = $"name = '{safeName}' and '{rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false";
-            var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id)");
-            if (res.IsSuccessStatusCode)
-            {
-                var json = await res.Content.ReadAsStringAsync();
-                using var doc = JsonDocument.Parse(json);
-                var files = doc.RootElement.GetProperty("files");
-                if (files.GetArrayLength() > 0)
-                {
-                    var id = files[0].GetProperty("id").GetString();
-                    await _httpClient.DeleteAsync($"https://www.googleapis.com/drive/v3/files/{id}");
-                }
-            }
-
-            var allMetas = new Dictionary<string, RemoteGameMeta>(await LoadRemoteMetasStrictAsync(forceRefresh: true), StringComparer.OrdinalIgnoreCase);
-            if (allMetas.Remove(gameId))
-            {
-                var catalogJson = JsonSerializer.Serialize(allMetas, new JsonSerializerOptions { WriteIndented = true });
-                var catalogUpload = await UploadOrUpdateFileAsync(rootId, "catalog.json", Encoding.UTF8.GetBytes(catalogJson), "application/json");
-                if (!catalogUpload.success)
-                    return (false, catalogUpload.error ?? "Failed to update the Google Drive backup catalog.");
-                _cachedRemoteMetas = allMetas;
-            }
-
-            return (true, null);
-        }
-        catch (Exception ex)
-        {
-            return (false, ex.Message);
-        }
     }
 }

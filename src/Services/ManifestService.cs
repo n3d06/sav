@@ -89,9 +89,6 @@ public class ManifestService : IManifestService
                 
                 // Load custom manifest
                 await LoadCustomManifestAsync();
-                
-                // Clean up large temporary JSON deserialization buffers
-                MemoryOptimizer.TrimMemory();
 
                 return true;
             }
