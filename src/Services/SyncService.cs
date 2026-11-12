@@ -57,7 +57,7 @@ public class SyncService : ISyncService
         var localZip = Path.Combine(_backupService.GetGameCacheDir(game.Id), "latest.zip");
         if (File.Exists(localZip))
         {
-            var localHash = BackupService.ComputeSha256(localZip);
+            var localHash = BackupService.GetArchiveHashCached(localZip);
             if (!string.IsNullOrEmpty(remote.ArchiveHash) &&
                 string.Equals(localHash, remote.ArchiveHash, StringComparison.OrdinalIgnoreCase))
             {

@@ -39,10 +39,47 @@ public class BackupService : IBackupService
 
     public static string ComputeSha256(string filePath)
     {
-        using var sha = SHA256.Create();
         using var stream = File.OpenRead(filePath);
-        var hash = sha.ComputeHash(stream);
-        return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// SHA256 of an archive, cached in a "&lt;file&gt;.sha256" sidecar keyed by size and last-write time.
+    /// Avoids re-hashing every cached latest.zip each time 'sav ls' runs; any rewrite of the
+    /// archive (backup, pull, manual copy) changes size or mtime and invalidates the cache.
+    /// </summary>
+    public static string GetArchiveHashCached(string filePath)
+    {
+        var info = new FileInfo(filePath);
+        var key = $"{info.Length}|{info.LastWriteTimeUtc.Ticks}|";
+        var sidecar = filePath + ".sha256";
+
+        try
+        {
+            if (File.Exists(sidecar))
+            {
+                var cached = File.ReadAllText(sidecar).Trim();
+                if (cached.StartsWith(key, StringComparison.Ordinal) && cached.Length == key.Length + 64)
+                {
+                    return cached[key.Length..];
+                }
+            }
+        }
+        catch { }
+
+        var hash = ComputeSha256(filePath);
+        StoreArchiveHash(filePath, hash);
+        return hash;
+    }
+
+    private static void StoreArchiveHash(string filePath, string hash)
+    {
+        try
+        {
+            var info = new FileInfo(filePath);
+            File.WriteAllText(filePath + ".sha256", $"{info.Length}|{info.LastWriteTimeUtc.Ticks}|{hash}");
+        }
+        catch { }
     }
 
     public static string ComputeSha256(byte[] data)
@@ -70,6 +107,7 @@ public class BackupService : IBackupService
             var fileList = new List<object>();
             var restorePaths = new List<object>();
             DateTime? latestFileModifiedUtc = null;
+            string archiveHashResult = string.Empty;
 
             var zipPath = Path.Combine(gameCacheDir, "latest.zip");
             var metaPath = Path.Combine(gameCacheDir, "meta.json");
@@ -180,6 +218,8 @@ public class BackupService : IBackupService
 
                 // Compute overall archive hash
                 var archiveHash = ComputeSha256(zipPath);
+                StoreArchiveHash(zipPath, archiveHash);
+                archiveHashResult = archiveHash;
                 var archiveSize = new FileInfo(zipPath).Length;
 
                 // Write meta.json
@@ -212,7 +252,7 @@ public class BackupService : IBackupService
                 ZipPath = zipPath,
                 MetaPath = metaPath,
                 MappingPath = mappingPath,
-                ArchiveHash = ComputeSha256(zipPath),
+                ArchiveHash = archiveHashResult,
                 ArchiveSizeBytes = new FileInfo(zipPath).Length,
                 Timestamp = timestamp
             };

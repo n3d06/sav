@@ -748,7 +748,7 @@ public class GoogleDriveService : IGoogleDriveService
             ?? throw new InvalidDataException("Backup meta.json is invalid.");
         meta.GameId = p.GameId;
 
-        await UploadOrThrowAsync(gameFolderId, "latest.zip", await File.ReadAllBytesAsync(p.ZipPath), "application/zip");
+        await UploadFileResumableAsync(gameFolderId, "latest.zip", p.ZipPath, "application/zip");
 
         if (!string.IsNullOrEmpty(p.MappingPath) && File.Exists(p.MappingPath))
         {
@@ -757,6 +757,114 @@ public class GoogleDriveService : IGoogleDriveService
 
         await UploadOrThrowAsync(gameFolderId, "meta.json", metaBytes, "application/json");
         return meta;
+    }
+
+    private const int MaxResumeAttempts = 4;
+
+    /// <summary>
+    /// Uploads a file with Drive's resumable protocol, streaming from disk instead of loading it
+    /// into memory. If the connection drops, asks Drive how many bytes it already has and continues
+    /// from there (up to <see cref="MaxResumeAttempts"/> times). Replaces the file if it already exists.
+    /// </summary>
+    private async Task UploadFileResumableAsync(string folderId, string fileName, string filePath, string mime)
+    {
+        var totalBytes = new FileInfo(filePath).Length;
+        var existingId = await FindFileIdInFolderAsync(folderId, fileName, throwOnError: true);
+
+        // 1. Start a session; Drive returns the session URI in the Location header.
+        HttpRequestMessage startRequest;
+        if (!string.IsNullOrEmpty(existingId))
+        {
+            startRequest = new HttpRequestMessage(HttpMethod.Patch,
+                $"https://www.googleapis.com/upload/drive/v3/files/{existingId}?uploadType=resumable&fields=id")
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json")
+            };
+        }
+        else
+        {
+            var metadata = JsonSerializer.Serialize(new { name = fileName, parents = new[] { folderId } });
+            startRequest = new HttpRequestMessage(HttpMethod.Post,
+                "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id")
+            {
+                Content = new StringContent(metadata, Encoding.UTF8, "application/json")
+            };
+        }
+        startRequest.Headers.Add("X-Upload-Content-Type", mime);
+        startRequest.Headers.Add("X-Upload-Content-Length", totalBytes.ToString());
+
+        Uri sessionUri;
+        using (startRequest)
+        using (var startRes = await _httpClient.SendAsync(startRequest))
+        {
+            if (!startRes.IsSuccessStatusCode || startRes.Headers.Location == null)
+            {
+                var err = await startRes.Content.ReadAsStringAsync();
+                throw new IOException($"Failed to start upload of {fileName}: {(int)startRes.StatusCode} {err}");
+            }
+            sessionUri = startRes.Headers.Location;
+        }
+
+        // 2. Send the bytes, resuming from Drive's last confirmed offset after a failure.
+        long offset = 0;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
+                fs.Seek(offset, SeekOrigin.Begin);
+
+                using var put = new HttpRequestMessage(HttpMethod.Put, sessionUri) { Content = new StreamContent(fs, 81920) };
+                put.Content.Headers.ContentType = new MediaTypeHeaderValue(mime);
+                put.Content.Headers.ContentLength = totalBytes - offset;
+                if (totalBytes > 0)
+                {
+                    put.Content.Headers.ContentRange = new ContentRangeHeaderValue(offset, totalBytes - 1, totalBytes);
+                }
+
+                using var res = await _httpClient.SendAsync(put);
+                if (res.IsSuccessStatusCode) return;
+
+                var status = (int)res.StatusCode;
+                var body = await res.Content.ReadAsStringAsync();
+                // 4xx other than 408/429 means the request itself is wrong; retrying won't help.
+                if (status is >= 400 and < 500 and not 408 and not 429)
+                    throw new IOException($"Failed to upload {fileName}: {status} {body}");
+                if (attempt >= MaxResumeAttempts)
+                    throw new IOException($"Failed to upload {fileName} after {attempt} attempts: {status} {body}");
+            }
+            catch (HttpRequestException) when (attempt < MaxResumeAttempts) { }
+            catch (TaskCanceledException) when (attempt < MaxResumeAttempts) { }
+
+            await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt)));
+            var resumeFrom = await QueryUploadOffsetAsync(sessionUri, totalBytes);
+            if (resumeFrom == null) return; // Drive reports the upload as already complete
+            offset = resumeFrom.Value;
+        }
+    }
+
+    /// <summary>Returns the next byte Drive expects, or null if the upload already completed.</summary>
+    private async Task<long?> QueryUploadOffsetAsync(Uri sessionUri, long totalBytes)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Put, sessionUri) { Content = new ByteArrayContent(Array.Empty<byte>()) };
+        req.Content.Headers.ContentRange = new ContentRangeHeaderValue(totalBytes);
+        using var res = await _httpClient.SendAsync(req);
+
+        if (res.IsSuccessStatusCode) return null;
+        if ((int)res.StatusCode == 308)
+        {
+            // "Range: bytes=0-N" means bytes 0..N were received; no header means nothing was.
+            if (res.Headers.TryGetValues("Range", out var values))
+            {
+                var range = values.FirstOrDefault();
+                var dash = range?.LastIndexOf('-') ?? -1;
+                if (dash >= 0 && long.TryParse(range![(dash + 1)..], out var lastByte))
+                    return lastByte + 1;
+            }
+            return 0;
+        }
+
+        throw new IOException($"Upload session is no longer valid ({(int)res.StatusCode}). Please push again.");
     }
 
     private async Task UploadOrThrowAsync(string folderId, string fileName, byte[] content, string mime)
