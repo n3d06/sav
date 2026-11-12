@@ -155,8 +155,63 @@ public class PushHandler
         }
     }
 
+    /// <summary>
+    /// Finds selected games whose cloud backup contains saves newer than anything on this PC
+    /// (typically pushed from another machine) and asks before overwriting them.
+    /// Returns the games that should still be pushed.
+    /// </summary>
+    private async Task<List<DetectedGame>> ConfirmCloudNewerAsync(List<DetectedGame> games)
+    {
+        Dictionary<string, Services.RemoteGameMeta> remote = new();
+        await AnsiConsole.Status()
+            .Spinner(Spinner.Known.Dots)
+            .StartAsync("Checking cloud backups...", async ctx =>
+            {
+                remote = await _driveService.GetAllRemoteMetasAsync(forceRefresh: true);
+            });
+
+        var cloudNewer = new List<(DetectedGame Game, DateTime CloudUtc, DateTime LocalUtc)>();
+        foreach (var game in games)
+        {
+            if (!remote.TryGetValue(game.Id, out var meta) || !meta.LatestFileModifiedUtc.HasValue || game.Files.Count == 0)
+                continue;
+
+            var cloudUtc = meta.LatestFileModifiedUtc.Value.ToUniversalTime();
+            var localUtc = game.Files.Max(f => f.LastWriteTime.ToUniversalTime());
+            if (cloudUtc > localUtc + NewerTolerance)
+            {
+                cloudNewer.Add((game, cloudUtc, localUtc));
+            }
+        }
+
+        if (cloudNewer.Count == 0) return games;
+
+        AnsiConsole.WriteLine("WARNING: Google Drive has newer saves than this PC for:");
+        foreach (var (game, cloudUtc, localUtc) in cloudNewer)
+        {
+            AnsiConsole.WriteLine($"  - {game.Name}  (cloud: {ConsoleHelper.FormatDateTime(cloudUtc)}, this PC: {ConsoleHelper.FormatDateTime(localUtc)})");
+        }
+        AnsiConsole.WriteLine("Pushing would replace those cloud saves with the older ones from this PC. Consider 'sav pull' first.");
+
+        if (AnsiConsole.Confirm("Overwrite the newer cloud saves anyway?", defaultVal: false))
+        {
+            return games;
+        }
+
+        var skip = cloudNewer.Select(c => c.Game).ToHashSet();
+        var remaining = games.Where(g => !skip.Contains(g)).ToList();
+        AnsiConsole.WriteLine(remaining.Count == 0
+            ? "Nothing to push; cloud saves were left unchanged."
+            : $"Skipping {skip.Count} game(s); pushing the remaining {remaining.Count}.");
+        return remaining;
+    }
+
+    private static readonly TimeSpan NewerTolerance = TimeSpan.FromSeconds(2);
+
     private async Task PushSingleAsync(DetectedGame game)
     {
+        if ((await ConfirmCloudNewerAsync(new List<DetectedGame> { game })).Count == 0) return;
+
         AnsiConsole.WriteLine($"Starting backup for game: {game.Name}");
 
         bool success = false;
@@ -187,6 +242,9 @@ public class PushHandler
 
     private async Task PushBatchAsync(List<DetectedGame> games)
     {
+        games = await ConfirmCloudNewerAsync(games);
+        if (games.Count == 0) return;
+
         AnsiConsole.WriteLine($"Starting backup for {games.Count} game(s) to Google Drive...");
 
         bool success = false;

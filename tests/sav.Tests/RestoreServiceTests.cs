@@ -150,6 +150,136 @@ public class RestoreServiceTests
         }
     }
 
+    private static async Task WriteBackupAsync(string zipPath, params (string archivePath, string placeholder, string content, DateTime modifiedUtc)[] files)
+    {
+        using var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create);
+        foreach (var f in files)
+        {
+            var entry = zip.CreateEntry(f.archivePath);
+            await using var writer = new StreamWriter(entry.Open());
+            await writer.WriteAsync(f.content);
+        }
+
+        var map = zip.CreateEntry("restore-paths.json");
+        await using var mapWriter = new StreamWriter(map.Open());
+        await mapWriter.WriteAsync(JsonSerializer.Serialize(files.Select(f => new
+        {
+            archivePath = f.archivePath,
+            placeholderPath = f.placeholder,
+            modifiedUtc = f.modifiedUtc.ToString("O")
+        })));
+    }
+
+    [Fact]
+    public async Task Restore_keeps_copy_of_overwritten_files()
+    {
+        var testId = $"sav-test-{Guid.NewGuid():N}";
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var targetDir = Path.Combine(localAppData, testId);
+        var cacheDir = Path.Combine(Path.GetTempPath(), testId);
+        var zipPath = Path.Combine(cacheDir, "backup.zip");
+        Directory.CreateDirectory(cacheDir);
+        Directory.CreateDirectory(targetDir);
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(targetDir, "save.dat"), "old");
+            await WriteBackupAsync(zipPath, ("drive-C/x/save.dat", $"<localappdata>/{testId}/save.dat", "new", DateTime.UtcNow.AddDays(-1)));
+
+            var result = await new RestoreService(new TestConfigService(cacheDir)).RestoreGameAsync("test", zipPath);
+
+            Assert.True(result.Success, result.ErrorMessage);
+            Assert.Equal("new", await File.ReadAllTextAsync(Path.Combine(targetDir, "save.dat")));
+            Assert.NotNull(result.PreRestoreBackupDir);
+            Assert.True(File.Exists(Path.Combine(result.PreRestoreBackupDir!, "index.json")));
+            var backupFile = Directory.GetFiles(result.PreRestoreBackupDir!, "*.bak").Single();
+            Assert.Equal("old", await File.ReadAllTextAsync(backupFile));
+        }
+        finally
+        {
+            if (Directory.Exists(targetDir)) Directory.Delete(targetDir, recursive: true);
+            if (Directory.Exists(cacheDir)) Directory.Delete(cacheDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Restore_rolls_back_when_extraction_fails_midway()
+    {
+        var testId = $"sav-test-{Guid.NewGuid():N}";
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var targetDir = Path.Combine(localAppData, testId);
+        var cacheDir = Path.Combine(Path.GetTempPath(), testId);
+        var zipPath = Path.Combine(cacheDir, "backup.zip");
+        Directory.CreateDirectory(cacheDir);
+        Directory.CreateDirectory(targetDir);
+
+        try
+        {
+            var first = Path.Combine(targetDir, "a.dat");
+            await File.WriteAllTextAsync(first, "old-a");
+            // A directory where the second file should go makes extraction fail after the first file was written.
+            Directory.CreateDirectory(Path.Combine(targetDir, "b.dat"));
+            var newFile = Path.Combine(targetDir, "new.dat");
+
+            var time = DateTime.UtcNow.AddDays(-1);
+            await WriteBackupAsync(zipPath,
+                ("drive-C/x/a.dat", $"<localappdata>/{testId}/a.dat", "new-a", time),
+                ("drive-C/x/new.dat", $"<localappdata>/{testId}/new.dat", "brand-new", time),
+                ("drive-C/x/b.dat", $"<localappdata>/{testId}/b.dat", "new-b", time));
+
+            var result = await new RestoreService(new TestConfigService(cacheDir)).RestoreGameAsync("test", zipPath);
+
+            Assert.False(result.Success);
+            Assert.True(result.RolledBack, result.ErrorMessage);
+            Assert.Equal("old-a", await File.ReadAllTextAsync(first));
+            Assert.False(File.Exists(newFile));
+        }
+        finally
+        {
+            if (Directory.Exists(targetDir)) Directory.Delete(targetDir, recursive: true);
+            if (Directory.Exists(cacheDir)) Directory.Delete(cacheDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Preview_reports_local_files_newer_than_backup()
+    {
+        var testId = $"sav-test-{Guid.NewGuid():N}";
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var targetDir = Path.Combine(localAppData, testId);
+        var cacheDir = Path.Combine(Path.GetTempPath(), testId);
+        var zipPath = Path.Combine(cacheDir, "backup.zip");
+        Directory.CreateDirectory(cacheDir);
+        Directory.CreateDirectory(targetDir);
+
+        try
+        {
+            var newerLocal = Path.Combine(targetDir, "newer.dat");
+            var olderLocal = Path.Combine(targetDir, "older.dat");
+            await File.WriteAllTextAsync(newerLocal, "local");
+            await File.WriteAllTextAsync(olderLocal, "local");
+            var backupTime = DateTime.UtcNow.AddHours(-1);
+            File.SetLastWriteTimeUtc(olderLocal, backupTime.AddHours(-1));
+
+            await WriteBackupAsync(zipPath,
+                ("drive-C/x/newer.dat", $"<localappdata>/{testId}/newer.dat", "cloud", backupTime),
+                ("drive-C/x/older.dat", $"<localappdata>/{testId}/older.dat", "cloud", backupTime));
+
+            var preview = await new RestoreService(new TestConfigService(cacheDir)).PreviewRestoreAsync("test", zipPath);
+
+            Assert.True(preview.Success, preview.ErrorMessage);
+            Assert.Equal(2, preview.FileCount);
+            var conflict = Assert.Single(preview.NewerLocalFiles);
+            Assert.Equal(newerLocal, conflict.Path, ignoreCase: true);
+            Assert.Equal("local", await File.ReadAllTextAsync(newerLocal)); // preview never writes
+        }
+        finally
+        {
+            if (Directory.Exists(targetDir)) Directory.Delete(targetDir, recursive: true);
+            if (Directory.Exists(cacheDir)) Directory.Delete(cacheDir, recursive: true);
+        }
+    }
+
     private sealed class TestConfigService(string cacheDir) : IConfigService
     {
         public AppSettings Settings { get; } = new();

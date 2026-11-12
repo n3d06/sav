@@ -69,6 +69,7 @@ public class BackupService : IBackupService
             var drives = new Dictionary<string, string>();
             var fileList = new List<object>();
             var restorePaths = new List<object>();
+            DateTime? latestFileModifiedUtc = null;
 
             var zipPath = Path.Combine(gameCacheDir, "latest.zip");
             var metaPath = Path.Combine(gameCacheDir, "meta.json");
@@ -116,6 +117,11 @@ public class BackupService : IBackupService
                         }
 
                         file.Sha256 = hash;
+                        var fileModifiedUtc = file.LastWriteTime.ToUniversalTime();
+                        if (!latestFileModifiedUtc.HasValue || fileModifiedUtc > latestFileModifiedUtc.Value)
+                        {
+                            latestFileModifiedUtc = fileModifiedUtc;
+                        }
 
                         fileList.Add(new
                         {
@@ -184,6 +190,7 @@ public class BackupService : IBackupService
                     timestamp = timestamp.ToString("o"),
                     updatedAt = timestamp.ToString("o"),
                     lastModified = timestamp.ToString("o"),
+                    latestFileModifiedUtc = latestFileModifiedUtc?.ToString("o"),
                     fileCount = fileList.Count,
                     totalSize = archiveSize,
                     zipSize = archiveSize,

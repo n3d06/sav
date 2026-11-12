@@ -11,6 +11,8 @@ public class RemoteGameMeta
     public int? SteamId { get; set; }
     public string? CustomBannerUrl { get; set; }
 
+    /// <summary>Newest save-file modification time inside the backup (UTC). Null for backups made by older versions.</summary>
+    public DateTime? LatestFileModifiedUtc { get; set; }
 
     public string FormattedSize
     {

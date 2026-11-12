@@ -663,72 +663,107 @@ public class GoogleDriveService : IGoogleDriveService
             // Strict load: abort the push rather than rewrite catalog.json from a partial view.
             var allMetas = new Dictionary<string, RemoteGameMeta>(await LoadRemoteMetasStrictAsync(), StringComparer.OrdinalIgnoreCase);
 
-            var uploadItems = new List<(string folderId, string fileName, byte[] content, string mime)>();
-
+            // Resolve folders sequentially so two games never race to create the same folder.
+            var folderIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var p in payloads)
             {
-                var gameFolderId = await GetOrCreateGameFolderIdAsync(p.GameId);
-
-                if (File.Exists(p.ZipPath))
-                {
-                    var zipBytes = await File.ReadAllBytesAsync(p.ZipPath);
-                    uploadItems.Add((gameFolderId, "latest.zip", zipBytes, "application/zip"));
-                }
-
-                if (!string.IsNullOrEmpty(p.MetaPath) && File.Exists(p.MetaPath))
-                {
-                    var metaBytes = await File.ReadAllBytesAsync(p.MetaPath);
-                    uploadItems.Add((gameFolderId, "meta.json", metaBytes, "application/json"));
-
-                    var metaText = Encoding.UTF8.GetString(metaBytes);
-                    var metaObj = JsonSerializer.Deserialize<RemoteGameMeta>(metaText, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    if (metaObj != null)
-                    {
-                        allMetas[p.GameId] = metaObj;
-                    }
-                }
-
-                if (!string.IsNullOrEmpty(p.MappingPath) && File.Exists(p.MappingPath))
-                {
-                    var mapBytes = await File.ReadAllBytesAsync(p.MappingPath);
-                    uploadItems.Add((gameFolderId, "mapping.yaml", mapBytes, "application/x-yaml"));
-                }
+                folderIds[p.GameId] = await GetOrCreateGameFolderIdAsync(p.GameId);
             }
 
-            int totalFiles = uploadItems.Count;
-            int uploadedFiles = 0;
-            progressCallback?.Invoke($"Uploading {totalFiles} file(s) in parallel to Google Drive (0/{totalFiles})...");
+            int total = payloads.Count;
+            int done = 0;
+            var failures = new ConcurrentBag<string>();
+            var uploadedMetas = new ConcurrentDictionary<string, RemoteGameMeta>(StringComparer.OrdinalIgnoreCase);
+            using var gate = new SemaphoreSlim(MaxParallelGameUploads);
+            progressCallback?.Invoke($"Uploading {total} game(s) to Google Drive (0/{total})...");
 
-            var tasks = uploadItems.Select(async item =>
+            var tasks = payloads.Select(async p =>
             {
-                var res = await UploadOrUpdateFileAsync(item.folderId, item.fileName, item.content, item.mime);
-                if (!res.success)
+                await gate.WaitAsync();
+                try
                 {
-                    throw new Exception(res.error ?? $"Failed to upload {item.fileName}");
+                    var meta = await UploadSingleGameAsync(folderIds[p.GameId], p);
+                    uploadedMetas[p.GameId] = meta;
                 }
-                var count = Interlocked.Increment(ref uploadedFiles);
-                progressCallback?.Invoke($"Uploading {totalFiles} file(s) in parallel to Google Drive ({count}/{totalFiles})...");
+                catch (Exception ex)
+                {
+                    failures.Add($"{p.GameName}: {ex.Message}");
+                }
+                finally
+                {
+                    gate.Release();
+                    var count = Interlocked.Increment(ref done);
+                    progressCallback?.Invoke($"Uploading {total} game(s) to Google Drive ({count}/{total})...");
+                }
             });
-
             await Task.WhenAll(tasks);
 
-            // Update catalog.json on root 'sav'
-            progressCallback?.Invoke("Updating catalog index on Google Drive...");
-            var catalogJson = JsonSerializer.Serialize(allMetas, new JsonSerializerOptions { WriteIndented = true });
-            var catalogBytes = Encoding.UTF8.GetBytes(catalogJson);
-            var catalogUpload = await UploadOrUpdateFileAsync(rootFolderId, "catalog.json", catalogBytes, "application/json");
-            if (!catalogUpload.success)
+            // Catalog only reflects games whose zip AND meta.json both made it to Drive.
+            if (!uploadedMetas.IsEmpty)
             {
-                return (false, catalogUpload.error ?? "Failed to update the Google Drive backup catalog.");
+                foreach (var (id, meta) in uploadedMetas)
+                {
+                    allMetas[id] = meta;
+                }
+
+                progressCallback?.Invoke("Updating catalog index on Google Drive...");
+                var catalogJson = JsonSerializer.Serialize(allMetas, new JsonSerializerOptions { WriteIndented = true });
+                var catalogBytes = Encoding.UTF8.GetBytes(catalogJson);
+                var catalogUpload = await UploadOrUpdateFileAsync(rootFolderId, "catalog.json", catalogBytes, "application/json");
+                if (!catalogUpload.success)
+                {
+                    return (false, catalogUpload.error ?? "Failed to update the Google Drive backup catalog.");
+                }
+                _cachedRemoteMetas = allMetas;
             }
 
-            _cachedRemoteMetas = allMetas;
+            if (!failures.IsEmpty)
+            {
+                return (false, "Upload failed for " + string.Join("; ", failures));
+            }
             return (true, null);
         }
         catch (Exception ex)
         {
             return (false, ex.Message);
         }
+    }
+
+    private const int MaxParallelGameUploads = 3;
+
+    /// <summary>
+    /// Uploads one game's files in a fixed order: latest.zip, mapping.yaml, then meta.json last.
+    /// meta.json is the "commit marker": if the zip fails, Drive keeps the old meta that still
+    /// describes the old zip, so the remote state never claims a backup it doesn't have.
+    /// </summary>
+    private async Task<RemoteGameMeta> UploadSingleGameAsync(string gameFolderId, GameBackupPayload p)
+    {
+        if (!File.Exists(p.ZipPath))
+            throw new FileNotFoundException("Backup archive not found.", p.ZipPath);
+        if (string.IsNullOrEmpty(p.MetaPath) || !File.Exists(p.MetaPath))
+            throw new FileNotFoundException("Backup meta.json not found.", p.MetaPath);
+
+        var metaBytes = await File.ReadAllBytesAsync(p.MetaPath);
+        var meta = JsonSerializer.Deserialize<RemoteGameMeta>(metaBytes, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            ?? throw new InvalidDataException("Backup meta.json is invalid.");
+        meta.GameId = p.GameId;
+
+        await UploadOrThrowAsync(gameFolderId, "latest.zip", await File.ReadAllBytesAsync(p.ZipPath), "application/zip");
+
+        if (!string.IsNullOrEmpty(p.MappingPath) && File.Exists(p.MappingPath))
+        {
+            await UploadOrThrowAsync(gameFolderId, "mapping.yaml", await File.ReadAllBytesAsync(p.MappingPath), "application/x-yaml");
+        }
+
+        await UploadOrThrowAsync(gameFolderId, "meta.json", metaBytes, "application/json");
+        return meta;
+    }
+
+    private async Task UploadOrThrowAsync(string folderId, string fileName, byte[] content, string mime)
+    {
+        var res = await UploadOrUpdateFileAsync(folderId, fileName, content, mime);
+        if (!res.success)
+            throw new IOException(res.error ?? $"Failed to upload {fileName}");
     }
 
     public async Task<(bool success, string? error)> DownloadGameSaveAsync(string gameId, string targetDir)
@@ -739,34 +774,76 @@ public class GoogleDriveService : IGoogleDriveService
         var ok = await EnsureAuthenticatedAsync();
         if (!ok) return (false, "Google Drive authentication error.");
 
+        string? tempPath = null;
         try
         {
             var gameFolderId = await GetOrCreateGameFolderIdAsync(gameId);
-            var zipFileId = await FindFileIdInFolderAsync(gameFolderId, "latest.zip");
+            var zipFileId = await FindFileIdInFolderAsync(gameFolderId, "latest.zip", throwOnError: true);
             if (string.IsNullOrEmpty(zipFileId))
             {
                 return (false, $"Save file 'latest.zip' for game '{gameId}' not found on Google Drive.");
             }
 
+            // Checksums computed by Drive, used to verify the download end-to-end.
+            string? expectedSha256 = null, expectedMd5 = null;
+            using (var infoRes = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{zipFileId}?fields=sha256Checksum,md5Checksum"))
+            {
+                if (infoRes.IsSuccessStatusCode)
+                {
+                    using var infoDoc = JsonDocument.Parse(await infoRes.Content.ReadAsStringAsync());
+                    if (infoDoc.RootElement.TryGetProperty("sha256Checksum", out var s)) expectedSha256 = s.GetString();
+                    if (infoDoc.RootElement.TryGetProperty("md5Checksum", out var m)) expectedMd5 = m.GetString();
+                }
+            }
+
             Directory.CreateDirectory(targetDir);
             var zipPath = Path.Combine(targetDir, "latest.zip");
+            tempPath = Path.Combine(targetDir, $".download-{Guid.NewGuid():N}.tmp");
 
-            var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{zipFileId}?alt=media", HttpCompletionOption.ResponseHeadersRead);
+            using var res = await _httpClient.GetAsync($"https://www.googleapis.com/drive/v3/files/{zipFileId}?alt=media", HttpCompletionOption.ResponseHeadersRead);
             if (!res.IsSuccessStatusCode)
             {
                 return (false, $"Failed to download file from Google Drive: {res.StatusCode}");
             }
 
-            await using (var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            using var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+            await using (var source = await res.Content.ReadAsStreamAsync())
+            await using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                await res.Content.CopyToAsync(fs);
+                var buffer = new byte[81920];
+                int read;
+                while ((read = await source.ReadAsync(buffer)) > 0)
+                {
+                    sha.AppendData(buffer, 0, read);
+                    md5.AppendData(buffer, 0, read);
+                    await fs.WriteAsync(buffer.AsMemory(0, read));
+                }
             }
 
+            var actualSha256 = Convert.ToHexString(sha.GetHashAndReset());
+            var actualMd5 = Convert.ToHexString(md5.GetHashAndReset());
+            if ((!string.IsNullOrEmpty(expectedSha256) && !actualSha256.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrEmpty(expectedMd5) && !actualMd5.Equals(expectedMd5, StringComparison.OrdinalIgnoreCase)))
+            {
+                return (false, "Downloaded archive is corrupted (checksum mismatch). Please try again.");
+            }
+
+            // Only replace the cached archive once the new one is complete and verified.
+            File.Move(tempPath, zipPath, overwrite: true);
+            tempPath = null;
             return (true, null);
         }
         catch (Exception ex)
         {
             return (false, ex.Message);
+        }
+        finally
+        {
+            if (tempPath != null)
+            {
+                try { File.Delete(tempPath); } catch { }
+            }
         }
     }
 

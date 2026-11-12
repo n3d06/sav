@@ -141,92 +141,221 @@ public class PullHandler
         }
     }
 
+    /// <summary>A downloaded-but-not-yet-applied backup, kept outside the cache's latest.zip until restored.</summary>
+    private sealed record PreparedPull(RemoteGameMeta Meta, string IncomingDir, string IncomingZip, RestorePreview Preview);
+
+    private async Task<(PreparedPull? prepared, string? error)> PrepareAsync(RemoteGameMeta meta)
+    {
+        var cacheDir = _backupService.GetGameCacheDir(meta.GameId);
+        var incomingDir = Path.Combine(cacheDir, "incoming");
+        var dl = await _driveService.DownloadGameSaveAsync(meta.GameId, incomingDir);
+        if (!dl.success)
+        {
+            Discard(incomingDir);
+            return (null, $"Download error: {dl.error ?? "Failed to download file from Google Drive"}");
+        }
+
+        var incomingZip = Path.Combine(incomingDir, "latest.zip");
+        var preview = await _restoreService.PreviewRestoreAsync(meta.GameId, incomingZip);
+        if (!preview.Success)
+        {
+            Discard(incomingDir);
+            return (null, $"Invalid backup: {preview.ErrorMessage ?? "unknown error"}");
+        }
+
+        return (new PreparedPull(meta, incomingDir, incomingZip, preview), null);
+    }
+
+    private async Task<RestoreResult> ApplyAsync(PreparedPull p)
+    {
+        try
+        {
+            var result = await _restoreService.RestoreGameAsync(p.Meta.GameId, p.IncomingZip);
+            if (result.Success)
+            {
+                // The restored archive now matches this PC, so it becomes the cached copy used for sync status.
+                var cachedZip = Path.Combine(_backupService.GetGameCacheDir(p.Meta.GameId), "latest.zip");
+                File.Move(p.IncomingZip, cachedZip, overwrite: true);
+            }
+            return result;
+        }
+        finally
+        {
+            Discard(p.IncomingDir);
+        }
+    }
+
+    private static void Discard(string incomingDir)
+    {
+        try
+        {
+            if (Directory.Exists(incomingDir)) Directory.Delete(incomingDir, recursive: true);
+        }
+        catch { }
+    }
+
+    private static void PrintNewerLocalFiles(RestorePreview preview, string indent = "  ")
+    {
+        const int maxShown = 5;
+        foreach (var c in preview.NewerLocalFiles.Take(maxShown))
+        {
+            AnsiConsole.WriteLine($"{indent}{c.Path}  (this PC: {ConsoleHelper.FormatDateTime(c.LocalModifiedUtc)}, backup: {ConsoleHelper.FormatDateTime(c.BackupModifiedUtc)})");
+        }
+        if (preview.NewerLocalFiles.Count > maxShown)
+        {
+            AnsiConsole.WriteLine($"{indent}... and {preview.NewerLocalFiles.Count - maxShown} more");
+        }
+    }
+
+    private static void PrintRestoreResult(RestoreResult res)
+    {
+        if (res.Success && !string.IsNullOrEmpty(res.PreRestoreBackupDir))
+        {
+            AnsiConsole.WriteLine($"Previous save files were copied to: {res.PreRestoreBackupDir}");
+        }
+    }
+
     private async Task PullSingleAsync(RemoteGameMeta meta)
     {
         AnsiConsole.WriteLine($"Starting download and restore: {meta.GameName}");
-        if (!AnsiConsole.Confirm($"Restore {meta.FileCount} file(s) for '{meta.GameName}'? Existing save files may be overwritten.", defaultVal: false))
-        {
-            AnsiConsole.WriteLine("Restore cancelled; no files were changed.");
-            return;
-        }
 
-        bool success = false;
+        PreparedPull? prepared = null;
         string? error = null;
-        int restoredCount = 0;
-
         await AnsiConsole.Status()
             .Spinner(Spinner.Known.Dots)
             .StartAsync("Downloading save archive from Google Drive...", async ctx =>
             {
-                var cacheDir = _backupService.GetGameCacheDir(meta.GameId);
-                var dl = await _driveService.DownloadGameSaveAsync(meta.GameId, cacheDir);
-                if (!dl.success)
-                {
-                    error = dl.error ?? "Failed to download file from Google Drive";
-                    return;
-                }
-
-                ctx.Status("Extracting and restoring into save directory...");
-                var zipPath = Path.Combine(cacheDir, "latest.zip");
-                var restoreRes = await _restoreService.RestoreGameAsync(meta.GameId, zipPath);
-                success = restoreRes.Success;
-                error = restoreRes.ErrorMessage;
-                restoredCount = restoreRes.RestoredFilesCount;
+                (prepared, error) = await PrepareAsync(meta);
             });
 
-        if (success)
+        if (prepared == null)
         {
-            AnsiConsole.WriteLine($"Successfully restored {restoredCount} save file(s) for '{meta.GameName}'.");
+            AnsiConsole.WriteLine($"Restore failed: {error}");
+            throw new InvalidOperationException(error ?? "Restore failed.");
+        }
+
+        var preview = prepared.Preview;
+        bool confirmed;
+        if (preview.NewerLocalFiles.Count > 0)
+        {
+            AnsiConsole.WriteLine($"WARNING: {preview.NewerLocalFiles.Count} save file(s) on this PC are NEWER than the cloud backup:");
+            PrintNewerLocalFiles(preview);
+            confirmed = AnsiConsole.Confirm($"Overwrite them with the older cloud saves for '{meta.GameName}'?", defaultVal: false);
         }
         else
         {
-            AnsiConsole.WriteLine($"Restore failed: {error ?? "Unknown error"}");
-            throw new InvalidOperationException(error ?? "Restore failed.");
+            confirmed = AnsiConsole.Confirm($"Restore {preview.FileCount} file(s) for '{meta.GameName}'? Existing save files may be overwritten.", defaultVal: false);
+        }
+
+        if (!confirmed)
+        {
+            Discard(prepared.IncomingDir);
+            AnsiConsole.WriteLine("Restore cancelled; no files were changed.");
+            return;
+        }
+
+        RestoreResult result = new();
+        await AnsiConsole.Status()
+            .Spinner(Spinner.Known.Dots)
+            .StartAsync("Extracting and restoring into save directory...", async ctx =>
+            {
+                result = await ApplyAsync(prepared);
+            });
+
+        if (result.Success)
+        {
+            AnsiConsole.WriteLine($"Successfully restored {result.RestoredFilesCount} save file(s) for '{meta.GameName}'.");
+            PrintRestoreResult(result);
+        }
+        else
+        {
+            AnsiConsole.WriteLine($"Restore failed: {result.ErrorMessage ?? "Unknown error"}");
+            throw new InvalidOperationException(result.ErrorMessage ?? "Restore failed.");
         }
     }
 
     private async Task PullBatchAsync(List<RemoteGameMeta> list)
     {
         AnsiConsole.WriteLine($"Starting pull for {list.Count} game(s) from Google Drive...");
-        var totalFiles = list.Sum(game => game.FileCount);
-        if (!AnsiConsole.Confirm($"Restore {totalFiles} file(s) across {list.Count} game(s)? Existing save files may be overwritten.", defaultVal: false))
+
+        int failCount = 0;
+        var prepared = new List<PreparedPull>();
+
+        // 1. Download and inspect everything first; nothing on disk changes yet.
+        for (int i = 0; i < list.Count; i++)
         {
+            var meta = list[i];
+            AnsiConsole.Write($"[{i + 1}/{list.Count}] Downloading {meta.GameName}... ");
+            var (p, error) = await PrepareAsync(meta);
+            if (p == null)
+            {
+                AnsiConsole.WriteLine(error ?? "failed");
+                failCount++;
+                continue;
+            }
+            AnsiConsole.WriteLine(p.Preview.NewerLocalFiles.Count > 0 ? "OK (this PC has newer saves)" : "OK");
+            prepared.Add(p);
+        }
+
+        if (prepared.Count == 0)
+        {
+            AnsiConsole.WriteLine("\nNothing could be downloaded; no files were changed.");
+            throw new InvalidOperationException($"{failCount} game(s) failed to download.");
+        }
+
+        // 2. Ask once, with an extra explicit question for games where this PC is newer.
+        var totalFiles = prepared.Sum(p => p.Preview.FileCount);
+        AnsiConsole.WriteLine();
+        if (!AnsiConsole.Confirm($"Restore {totalFiles} file(s) across {prepared.Count} game(s)? Existing save files may be overwritten.", defaultVal: false))
+        {
+            prepared.ForEach(p => Discard(p.IncomingDir));
             AnsiConsole.WriteLine("Restore cancelled; no files were changed.");
             return;
         }
 
-        int successCount = 0;
-        int failCount = 0;
-
-        for (int i = 0; i < list.Count; i++)
+        var conflicted = prepared.Where(p => p.Preview.NewerLocalFiles.Count > 0).ToList();
+        if (conflicted.Count > 0)
         {
-            var meta = list[i];
-            AnsiConsole.Write($"[{i + 1}/{list.Count}] Processing {meta.GameName}... ");
-
-            var cacheDir = _backupService.GetGameCacheDir(meta.GameId);
-            var dl = await _driveService.DownloadGameSaveAsync(meta.GameId, cacheDir);
-            if (!dl.success)
+            AnsiConsole.WriteLine($"WARNING: {conflicted.Count} game(s) have save files on this PC that are NEWER than the cloud backup:");
+            foreach (var p in conflicted)
             {
-                AnsiConsole.WriteLine($"Download error: {dl.error ?? ""}");
-                failCount++;
-                continue;
+                AnsiConsole.WriteLine($"  {p.Meta.GameName}:");
+                PrintNewerLocalFiles(p.Preview, "    ");
             }
-
-            var zipPath = Path.Combine(cacheDir, "latest.zip");
-            var restoreRes = await _restoreService.RestoreGameAsync(meta.GameId, zipPath);
-            if (restoreRes.Success)
+            if (!AnsiConsole.Confirm("Overwrite those newer local saves too? (No = skip these games)", defaultVal: false))
             {
-                AnsiConsole.WriteLine($"Restored {restoreRes.RestoredFilesCount} files");
+                conflicted.ForEach(p => Discard(p.IncomingDir));
+                prepared = prepared.Except(conflicted).ToList();
+                AnsiConsole.WriteLine($"Skipping {conflicted.Count} game(s).");
+            }
+        }
+
+        // 3. Apply.
+        int successCount = 0;
+        string? lastBackupDir = null;
+        for (int i = 0; i < prepared.Count; i++)
+        {
+            var p = prepared[i];
+            AnsiConsole.Write($"[{i + 1}/{prepared.Count}] Restoring {p.Meta.GameName}... ");
+            var res = await ApplyAsync(p);
+            if (res.Success)
+            {
+                AnsiConsole.WriteLine($"Restored {res.RestoredFilesCount} files");
+                lastBackupDir ??= res.PreRestoreBackupDir;
                 successCount++;
             }
             else
             {
-                AnsiConsole.WriteLine($"Extraction error: {restoreRes.ErrorMessage ?? ""}");
+                AnsiConsole.WriteLine($"Extraction error: {res.ErrorMessage ?? ""}");
                 failCount++;
             }
         }
 
         AnsiConsole.WriteLine($"\nCompleted! Succeeded: {successCount}, Failed: {failCount}.");
+        if (lastBackupDir != null)
+        {
+            AnsiConsole.WriteLine("Previous save files were copied to each game's 'pre-restore' folder in the sav cache.");
+        }
         if (failCount > 0)
         {
             throw new InvalidOperationException($"{failCount} game(s) failed to restore.");
