@@ -104,10 +104,15 @@ public class LsHandler
         }
 
         var localGameIds = new HashSet<string>(games.Select(g => g.Id), StringComparer.OrdinalIgnoreCase);
-        var remoteOnly = remoteMetas.Values
-            .Where(r => !localGameIds.Contains(r.GameId))
-            .OrderBy(r => r.GameName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var remoteOnly = PullHandler.OrderForSelection(remoteMetas.Values
+            .Where(r => !localGameIds.Contains(r.GameId)));
+
+        // 'sav pull <#>' numbers cloud backups, not local games, so pull hints must use the cloud numbering.
+        var pullIndex = PullHandler.OrderForSelection(remoteMetas.Values)
+            .Select((m, i) => (m.GameId, Index: i + 1))
+            .ToDictionary(x => x.GameId, x => x.Index, StringComparer.OrdinalIgnoreCase);
+        string PullLabel(string gameId, string name) =>
+            pullIndex.TryGetValue(gameId, out var n) ? $"[{n}]" : $"\"{name}\"";
 
         bool hasDifferences = toPush.Count > 0 || untracked.Count > 0 || toPull.Count > 0 || remoteOnly.Count > 0;
 
@@ -158,14 +163,14 @@ public class LsHandler
             AnsiConsole.WriteLine();
             AnsiConsole.WriteLine("Changes available on Google Drive to restore:");
             AnsiConsole.MarkupLine("  [dim](use \"sav pull <#>\" or \"sav pull all\" to download)[/]");
-            foreach (var (g, idx) in toPull)
+            foreach (var (g, _) in toPull)
             {
-                AnsiConsole.MarkupLine($"\t[{idx}] [cyan]newer[/]: {g.Name} [dim]({g.TotalSizeFormatted})[/]");
+                AnsiConsole.MarkupLine($"\t{PullLabel(g.Id, g.Name)} [cyan]newer[/]: {g.Name} [dim]({g.TotalSizeFormatted})[/]");
             }
             foreach (var r in remoteOnly)
             {
                 var size = string.IsNullOrEmpty(r.FormattedSize) ? "-" : r.FormattedSize;
-                AnsiConsole.MarkupLine($"\t[cyan]cloud only:[/] {r.GameName} [dim]({size})[/]");
+                AnsiConsole.MarkupLine($"\t{PullLabel(r.GameId, r.GameName)} [cyan]cloud only[/]: {r.GameName} [dim]({size})[/]");
             }
         }
 

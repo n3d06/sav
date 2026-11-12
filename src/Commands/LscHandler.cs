@@ -38,7 +38,7 @@ public class LscHandler
             .StartAsync("Fetching save backups from Google Drive...", async ctx =>
             {
                 var metasDict = await _driveService.GetAllRemoteMetasAsync(forceRefresh: true);
-                list = metasDict.Values.OrderBy(m => m.GameName, StringComparer.OrdinalIgnoreCase).ToList();
+                list = PullHandler.OrderForSelection(metasDict.Values);
 
                 if (!_manifestService.IsLoaded)
                 {

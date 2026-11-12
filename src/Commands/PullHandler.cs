@@ -18,6 +18,15 @@ public class PullHandler
         _backupService = backupService;
     }
 
+    /// <summary>
+    /// The one ordering used to number cloud backups. 'sav pull &lt;#&gt;', 'sav lsc' and the pull
+    /// hints in 'sav ls' must all use it so the numbers they show refer to the same game.
+    /// </summary>
+    public static List<RemoteGameMeta> OrderForSelection(IEnumerable<RemoteGameMeta> metas) =>
+        metas.OrderBy(m => m.GameName, StringComparer.OrdinalIgnoreCase)
+             .ThenBy(m => m.GameId, StringComparer.OrdinalIgnoreCase)
+             .ToList();
+
     public async Task ExecuteAsync(params string[]? targets)
     {
         if (!_driveService.IsConfigured)
@@ -33,7 +42,7 @@ public class PullHandler
             .StartAsync("Fetching save backups from Google Drive...", async ctx =>
             {
                 var dict = await _driveService.GetAllRemoteMetasAsync(forceRefresh: true);
-                remoteList = dict.Values.OrderBy(m => m.GameName, StringComparer.OrdinalIgnoreCase).ToList();
+                remoteList = OrderForSelection(dict.Values);
             });
 
         if (remoteList.Count == 0)

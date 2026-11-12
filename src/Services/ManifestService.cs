@@ -163,6 +163,21 @@ public class ManifestService : IManifestService
         }
     }
 
+    /// <summary>
+    /// Marker file meaning "custom_manifest.json was changed on this PC and Google Drive doesn't have it yet".
+    /// While it exists, the local list wins: it gets uploaded instead of being replaced by the cloud copy.
+    /// </summary>
+    public static string GetCustomManifestPendingPath(string cacheDir) => Path.Combine(cacheDir, "custom_manifest.pending");
+
+    private void MarkCustomManifestPending()
+    {
+        try
+        {
+            File.WriteAllText(GetCustomManifestPendingPath(_configService.CacheDir), DateTime.UtcNow.ToString("o"));
+        }
+        catch { }
+    }
+
     public async Task AddCustomGameAsync(GameEntry game)
     {
         var customPath = Path.Combine(_configService.CacheDir, "custom_manifest.json");
@@ -200,6 +215,7 @@ public class ManifestService : IManifestService
         };
         var json = JsonSerializer.Serialize(customGames, options);
         await File.WriteAllTextAsync(customPath, json);
+        MarkCustomManifestPending();
 
         // Update in-memory state
         var existingListIdx = _gamesList.FindIndex(g => g.Id == game.Id);
@@ -241,6 +257,7 @@ public class ManifestService : IManifestService
             };
             var json = JsonSerializer.Serialize(customGames, options);
             await File.WriteAllTextAsync(customPath, json);
+            MarkCustomManifestPending();
         }
 
         // Update in-memory state

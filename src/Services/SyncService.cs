@@ -313,15 +313,42 @@ public class SyncService : ISyncService
     {
         if (!_driveService.IsConfigured) return (false, "Google Drive is not configured");
         var customPath = Path.Combine(_configService.CacheDir, "custom_manifest.json");
-        if (!File.Exists(customPath)) return (true, null);
+        var pendingPath = ManifestService.GetCustomManifestPendingPath(_configService.CacheDir);
+        if (!File.Exists(customPath))
+        {
+            TryDelete(pendingPath);
+            return (true, null);
+        }
 
-        return await _driveService.UploadCustomManifestAsync(customPath);
+        var result = await _driveService.UploadCustomManifestAsync(customPath);
+        if (result.success)
+        {
+            TryDelete(pendingPath); // Drive now has the latest local list
+        }
+        return result;
     }
 
     public async Task<(bool success, string? message)> DownloadCustomManifestAsync()
     {
         if (!_driveService.IsConfigured) return (false, "Google Drive is not configured");
         var customPath = Path.Combine(_configService.CacheDir, "custom_manifest.json");
+
+        // Local changes that never reached Drive (e.g. 'sav add' while offline) must not be
+        // overwritten by the older cloud copy: push them up instead.
+        if (File.Exists(ManifestService.GetCustomManifestPendingPath(_configService.CacheDir)))
+        {
+            return await UploadCustomManifestAsync();
+        }
+
         return await _driveService.DownloadCustomManifestAsync(customPath);
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch { }
     }
 }
